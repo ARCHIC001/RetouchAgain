@@ -4,11 +4,11 @@
 
 ## 1. 设置路径与仓库变量
 
-在本地终端中设定研究工作区 `<SOURCE_ROOT>`、独立的导出目录 `<PUBLISH_ROOT>`（两者需为不同路径）以及目标仓库 `<OWNER>/visharness`。以 PowerShell 为例：
+在本地终端中设定研究工作区 `<SOURCE_ROOT>`、独立的导出目录 `<PUBLISH_ROOT>`（两者需为不同路径）以及目标仓库 `<OWNER>/RetouchAgain`。以 PowerShell 为例：
 
 ```powershell
 $SourceRoot = '<SOURCE_ROOT>'
-$PublishRoot = '<PUBLISH_ROOT>'$Repo = '<OWNER>/visharness'
+$PublishRoot = '<PUBLISH_ROOT>'$Repo = '<OWNER>/RetouchAgain'
 ```
 
 ## 2. 执行导出与静态检查
