@@ -3,3 +3,6 @@
 *.mjs text eol=lf
 *.json text eol=lf
 *.md text eol=lf
+"paired photos/DSC_3734/DSC_3734.NEF" binary -eol
+"paired photos/DSC_3734/DSC_3734.jpg" binary -eol
+"paired photos/DSC_3734/oDSC_3734.jpg" binary -eol

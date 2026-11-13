@@ -1,6 +1,8 @@
 # Publication mirror: data, runtime state and third-party installations stay local.
 /experiments/
-/paired photos/
+/paired photos/*
+!/paired photos/DSC_3734/
+/paired photos/DSC_3734/*
 /external/
 /backup-shadow/
 /research/
@@ -33,3 +35,8 @@ node_modules/
 *.pyd
 .DS_Store
 Thumbs.db
+._*
+# Only the explicitly authorized three-file example is included.
+!/paired photos/DSC_3734/DSC_3734.NEF
+!/paired photos/DSC_3734/DSC_3734.jpg
+!/paired photos/DSC_3734/oDSC_3734.jpg

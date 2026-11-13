@@ -5,7 +5,21 @@
   "source_build": "dsh-stage-runtime-v13-20261113",
   "manual_updates_only": true,
   "includes_experiment_results": false,
-  "includes_photographs": false,
+  "includes_photographs": true,
+  "example_resources": [
+    {
+      "path": "paired photos/DSC_3734/DSC_3734.NEF",
+      "role": "example-raw-input"
+    },
+    {
+      "path": "paired photos/DSC_3734/DSC_3734.jpg",
+      "role": "example-author-target"
+    },
+    {
+      "path": "paired photos/DSC_3734/oDSC_3734.jpg",
+      "role": "example-base-preview"
+    }
+  ],
   "includes_credentials_or_runtime_configuration": false,
   "includes_third_party_installations_or_full_texts": false,
   "license_added": false,
@@ -14,7 +28,7 @@
   "qualification_warning": "Git clone does not inherit original mtimes, source-records, input qualification, installed dependencies, or paid authorization. Do not forge those records.",
   "exclusions": [
     "experiment outputs and trajectories",
-    "photographs and original-author backups",
+    "all photographs except the three explicitly authorized DSC_3734 example resources; all original-author backups",
     "third-party source, binaries, models and full-text literature",
     "runtime configuration, credentials and paid authorization",
     "historical shadow, migration snapshots and recovery bundles",
@@ -24,7 +38,7 @@
     "DSH installation",
     "LightCraft-compatible native backend",
     "Adobe DNG Converter when source conversion is needed",
-    "authorized photo inputs",
+    "separate input qualification even for the included example",
     "frozen textbook and qualification records",
     "separately configured runtime and disabled-by-default authorization"
   ],
@@ -46,6 +60,18 @@
     "src/check_photo_stage_continuation.py"
   ],
   "files": [
+    {
+      "path": "paired photos/DSC_3734/DSC_3734.NEF",
+      "role": "example-raw-input"
+    },
+    {
+      "path": "paired photos/DSC_3734/DSC_3734.jpg",
+      "role": "example-author-target"
+    },
+    {
+      "path": "paired photos/DSC_3734/oDSC_3734.jpg",
+      "role": "example-base-preview"
+    },
     {
       "path": "src/adapt_panorama_display_reference.py",
       "role": "raw-display-contract-publication-derivative"
