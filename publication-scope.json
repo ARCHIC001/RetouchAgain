@@ -1,0 +1,306 @@
+{
+  "schema": "visharness-publication-scope/v1",
+  "document_status": "Publication derivative; not a historical original or experiment result.",
+  "source_snapshot_date": "2026-11-13",
+  "source_build": "dsh-stage-runtime-v13-20261113",
+  "manual_updates_only": true,
+  "includes_experiment_results": false,
+  "includes_photographs": false,
+  "includes_credentials_or_runtime_configuration": false,
+  "includes_third_party_installations_or_full_texts": false,
+  "license_added": false,
+  "runtime_ready": false,
+  "original_source_files_modified_by_export": false,
+  "qualification_warning": "Git clone does not inherit original mtimes, source-records, input qualification, installed dependencies, or paid authorization. Do not forge those records.",
+  "exclusions": [
+    "experiment outputs and trajectories",
+    "photographs and original-author backups",
+    "third-party source, binaries, models and full-text literature",
+    "runtime configuration, credentials and paid authorization",
+    "historical shadow, migration snapshots and recovery bundles",
+    "local export tools, manifest, state, audits and backups"
+  ],
+  "missing_runtime_dependencies": [
+    "DSH installation",
+    "LightCraft-compatible native backend",
+    "Adobe DNG Converter when source conversion is needed",
+    "authorized photo inputs",
+    "frozen textbook and qualification records",
+    "separately configured runtime and disabled-by-default authorization"
+  ],
+  "publication_derivative_changes": {
+    "src/adapt_panorama_display_reference.py": "Remove personal temporary dependency search path; use separately installed tifffile.",
+    "src/dsh_photo_bridge.mjs": "Use VISHARNESS_PYTHON or python instead of a personal interpreter path.",
+    "src/dsh_stage_adapter.mjs": "Retain explicit runtime.python preference, then VISHARNESS_PYTHON or python.",
+    "src/dsh_stage_run.mjs": "Retain explicit runtime.python preference, then VISHARNESS_PYTHON or python.",
+    "src/lab_timing_experiment.py": "Explicit full-author lookup requires VISHARNESS_FULL_AUTHOR_ROOT.",
+    "src/photo_opacity_contract.py": "Import separately installed tifffile without a personal temporary fallback.",
+    "src/photo_source_router.py": "Use VISHARNESS_DNG_CONVERTER or a documented external placeholder; remove personal dependency search path.",
+    "src/photo_stage_schema.py": "Remove one trailing space, with no algorithm change."
+  },
+  "synthetic_test_entrypoints": [
+    "src/check_photo_stage_tasks.py",
+    "src/check_photo_stage_operations.py",
+    "src/check_photo_stage_schema.py",
+    "src/check_photo_phase_workflow.py",
+    "src/check_photo_stage_continuation.py"
+  ],
+  "files": [
+    {
+      "path": "src/adapt_panorama_display_reference.py",
+      "role": "raw-display-contract-publication-derivative"
+    },
+    {
+      "path": "src/build_dsh_module_index.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/dsh_photo_bridge.mjs",
+      "role": "runtime-publication-derivative"
+    },
+    {
+      "path": "src/dsh_photo_color.py",
+      "role": "color-contract"
+    },
+    {
+      "path": "src/dsh_photo_module_policy.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/dsh_photo_persistence.mjs",
+      "role": "runtime"
+    },
+    {
+      "path": "src/dsh_photo_runtime.mjs",
+      "role": "runtime"
+    },
+    {
+      "path": "src/dsh_photo_strict_execute.py",
+      "role": "runtime"
+    },
+    {
+      "path": "src/dsh_stage_adapter.mjs",
+      "role": "runtime-publication-derivative"
+    },
+    {
+      "path": "src/dsh_stage_authorize.py",
+      "role": "runtime"
+    },
+    {
+      "path": "src/dsh_stage_run.mjs",
+      "role": "runtime-publication-derivative"
+    },
+    {
+      "path": "src/dsh_stage_validation.py",
+      "role": "runtime"
+    },
+    {
+      "path": "src/dsh_stage_worker.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/lab_timing_api.mjs",
+      "role": "transport"
+    },
+    {
+      "path": "src/lab_timing_dispatch_guard.mjs",
+      "role": "authorization"
+    },
+    {
+      "path": "src/lab_timing_experiment.py",
+      "role": "shared-foundation-publication-derivative"
+    },
+    {
+      "path": "src/photo_authorization_window.py",
+      "role": "authorization"
+    },
+    {
+      "path": "src/photo_capability_catalog.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_decision_memory.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_image_contract.py",
+      "role": "color-contract"
+    },
+    {
+      "path": "src/photo_image_dependencies.py",
+      "role": "environment-contract"
+    },
+    {
+      "path": "src/photo_input_contract.py",
+      "role": "color-contract"
+    },
+    {
+      "path": "src/photo_lifecycle_audit.py",
+      "role": "audit-algorithm"
+    },
+    {
+      "path": "src/photo_native_commands.py",
+      "role": "native-contract"
+    },
+    {
+      "path": "src/photo_opacity_contract.py",
+      "role": "color-contract-publication-derivative"
+    },
+    {
+      "path": "src/photo_phase_scheduler.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_proposal_bank.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_request_primitives.mjs",
+      "role": "transport"
+    },
+    {
+      "path": "src/photo_resize_contract.py",
+      "role": "color-contract"
+    },
+    {
+      "path": "src/photo_runtime_errors.mjs",
+      "role": "runtime"
+    },
+    {
+      "path": "src/photo_session_base.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_session_core.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_source_evidence.py",
+      "role": "evidence-contract"
+    },
+    {
+      "path": "src/photo_source_router.py",
+      "role": "raw-contract-publication-derivative"
+    },
+    {
+      "path": "src/photo_stage_bridge.mjs",
+      "role": "runtime"
+    },
+    {
+      "path": "src/photo_stage_continuation.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_stage_observation.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_stage_operations.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_stage_rejections.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_stage_resources.json",
+      "role": "resource-contract"
+    },
+    {
+      "path": "src/photo_stage_schema.py",
+      "role": "algorithm-publication-derivative"
+    },
+    {
+      "path": "src/photo_stage_submission.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_stage_tasks.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_textbook.py",
+      "role": "algorithm"
+    },
+    {
+      "path": "src/photo_tools.py",
+      "role": "native-contract"
+    },
+    {
+      "path": "src/photo_worker_bridge.mjs",
+      "role": "runtime"
+    },
+    {
+      "path": "src/prepare_dsh_stage_input.py",
+      "role": "input-preparation"
+    },
+    {
+      "path": "src/raw_render_contract.py",
+      "role": "raw-contract"
+    },
+    {
+      "path": "src/check_photo_stage_tasks.py",
+      "role": "synthetic-test"
+    },
+    {
+      "path": "src/check_photo_stage_operations.py",
+      "role": "synthetic-test"
+    },
+    {
+      "path": "src/check_photo_stage_schema.py",
+      "role": "synthetic-test"
+    },
+    {
+      "path": "src/check_photo_phase_workflow.py",
+      "role": "synthetic-test"
+    },
+    {
+      "path": "src/check_photo_stage_continuation.py",
+      "role": "synthetic-test"
+    },
+    {
+      "path": "README.md",
+      "role": "derived-method-document"
+    },
+    {
+      "path": "docs/architecture.md",
+      "role": "derived-method-document"
+    },
+    {
+      "path": "docs/memory-and-task-routing.md",
+      "role": "derived-method-document"
+    },
+    {
+      "path": "docs/observation-and-color.md",
+      "role": "derived-method-document"
+    },
+    {
+      "path": "docs/operations-and-masks.md",
+      "role": "derived-method-document"
+    },
+    {
+      "path": "docs/protocol-and-resources.md",
+      "role": "derived-method-document"
+    },
+    {
+      "path": "docs/scope-and-environment.md",
+      "role": "derived-method-document"
+    },
+    {
+      "path": "docs/manual-sync.md",
+      "role": "derived-publishing-document"
+    },
+    {
+      "path": ".gitignore",
+      "role": "publication-protection"
+    },
+    {
+      "path": ".gitattributes",
+      "role": "publication-text-policy"
+    },
+    {
+      "path": "publication-scope.json",
+      "role": "publication-inventory"
+    }
+  ]
+}

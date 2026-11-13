@@ -1,0 +1,63 @@
+{
+  "schema": "photo-stage-resources/v1",
+  "id": "stage-resource/v13",
+  "build": "dsh-stage-runtime-v13-20261113",
+  "planning": {
+    "requests": 50,
+    "checkpoints": 4,
+    "tone": 18,
+    "color": 16,
+    "joint": 8,
+    "reserve": 4,
+    "request_count_is_hard_limit": false
+  },
+  "cost_monitor": {
+    "currency": "CNY",
+    "forecast_peak": 3.2384,
+    "notice_at": 6,
+    "review_reference": 10,
+    "clearly_excessive_at": 15,
+    "no_progress_window": 8,
+    "no_progress_cost": 2,
+    "single_request_anomaly": 5,
+    "maximum_reserve_controls_next_request": false,
+    "pricing": {"input_per_million": 2, "cache_write_per_million": 2, "cache_read_per_million": 0.04, "output_per_million": 8},
+    "pricing_claim": "Historical project CNY peak estimate, not a provider invoice or current exchange-rate quote. Live public pricing is USD; unknown service tiers/meters require reconciliation."
+  },
+  "model": {
+    "provider": "deepseek-official",
+    "id": "deepseek-flash",
+    "effort": "high",
+    "context_tokens": 1000000,
+    "maximum_output_tokens": 393216,
+    "requested_output_tokens": 65536,
+    "source": "https://api-docs.deepseek.com/quick_start/pricing",
+    "source_checked": "2026-11-12",
+    "evidence": "Official public page lists deepseek-flash DeepSeek-V4.1-Flash-1017, 1M context and maximum output384K. Generation allocation65536 after a real G3 16384-token exhaustion; configurable up to provider maximum, not a parser-field limit."
+  },
+  "transport": {
+    "authorization_hours": 24,
+    "max_body_bytes": 16777216,
+    "max_text_bytes": 4194304,
+    "max_response_bytes": 16777216,
+    "timeout_ms": 600000,
+    "images": 2,
+    "overview_long_edge": 512,
+    "detail_long_edge": 384
+  },
+  "projection": {
+    "normal_context_tokens": [32768, 65536],
+    "context_guidance_tokens": 131072,
+    "guidance_is_hard_limit": false,
+    "target_text_bytes": 65536,
+    "history_page_bytes": 32768,
+    "text_byte_estimate_is_admission_gate": false,
+    "full_records_remain_retrievable": true
+  },
+  "scope": {
+    "mask_shapes": ["linear", "radial"],
+    "local_fields": ["exposure", "contrast", "highlights", "shadows", "whites", "blacks", "temp", "tint"],
+    "requires_actual_export_confirmation": true,
+    "allow_unknown_outcome_replay": false
+  }
+}

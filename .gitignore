@@ -1,0 +1,35 @@
+# Publication mirror: data, runtime state and third-party installations stay local.
+/experiments/
+/paired photos/
+/external/
+/backup-shadow/
+/research/
+/.zcode/
+/.obsidian/
+/tools/
+__pycache__/
+*.py[cod]
+node_modules/
+.env
+.env.*
+*credentials*
+*.local.json
+*.local.yaml
+*.local.yml
+*.log
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.nef
+*.dng
+*.pdf
+*.zip
+*.7z
+*.exe
+*.dll
+*.so
+*.pyd
+.DS_Store
+Thumbs.db
