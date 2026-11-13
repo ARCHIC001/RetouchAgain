@@ -1,5 +1,7 @@
 # Retouching Your Long-Horizon Professional Photo Again
 
+RetouchAgain is a domain-specific visual agent harness for long-horizon photo retouching. Built on an external agent runtime, it orchestrates iterative visual assessment, tool execution, state tracking, and verification.
+
 Retouching Your Long-Horizon Professional Photo Again（RetouchAgain）是一个面向**图像后期调色与参考图仿色（Color/Tone Matching）**的多轮视觉 Agent 框架。它将专业修图师的工作流抽象为可验证、可回退的工程闭环：让视觉大模型（DSH Agent）专注于看图对比、诊断问题与参数决策，而由确定性的 Python 状态机负责记忆存储、阶段权限隔离、色彩几何契约以及原生后端的原子执行。
 
 ---
