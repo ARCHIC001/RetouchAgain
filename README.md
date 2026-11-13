@@ -1,12 +1,12 @@
 # Retouching Your Long-Horizon Professional Photo Again
 
-Retouching Your Long-Horizon Professional Photo Again（VisHarness）是一个面向**图像后期调色与参考图仿色（Color/Tone Matching）**的多轮视觉 Agent 框架。它将专业修图师的工作流抽象为可验证、可回退的工程闭环：让视觉大模型（DSH Agent）专注于看图对比、诊断问题与参数决策，而由确定性的 Python 状态机负责记忆存储、阶段权限隔离、色彩几何契约以及原生后端的原子执行。
+Retouching Your Long-Horizon Professional Photo Again（RetouchAgain）是一个面向**图像后期调色与参考图仿色（Color/Tone Matching）**的多轮视觉 Agent 框架。它将专业修图师的工作流抽象为可验证、可回退的工程闭环：让视觉大模型（DSH Agent）专注于看图对比、诊断问题与参数决策，而由确定性的 Python 状态机负责记忆存储、阶段权限隔离、色彩几何契约以及原生后端的原子执行。
 
 ---
 
 ## 1. 分级调色闭环与阶段流转
 
-为了避免曝光、白平衡与色彩调整互相耦合干扰，VisHarness 采用**“先定影调、再调色彩、最后联合精修”**的三阶段架构，并在各阶段之间设置了 4 个全局检查点（`G1`–`G4`）：
+为了避免曝光、白平衡与色彩调整互相耦合干扰，RetouchAgain 采用**“先定影调、再调色彩、最后联合精修”**的三阶段架构，并在各阶段之间设置了 4 个全局检查点（`G1`–`G4`）：
 
 ```mermaid
 flowchart LR
@@ -30,7 +30,7 @@ flowchart LR
 
 ## 2. 视觉观察与色彩/几何管线
 
-模型每一轮的判断质量取决于输入图像的色彩与几何一致性。VisHarness 在观察层严格区分图像角色、色彩空间与对比类型：
+模型每一轮的判断质量取决于输入图像的色彩与几何一致性。RetouchAgain 在观察层严格区分图像角色、色彩空间与对比类型：
 
 ```mermaid
 flowchart TB
@@ -61,7 +61,7 @@ flowchart TB
 
 ## 3. 记忆存储、建议库与复用机制
 
-在长达数十轮的调色过程中，直接把全量历史和菜单塞进上下文会迅速稀释注意力。VisHarness 将会话状态拆分为**三层正交记忆**，并通过**工作包投影 + 游标检索**实现高效复用：
+在长达数十轮的调色过程中，直接把全量历史和菜单塞进上下文会迅速稀释注意力。RetouchAgain 将会话状态拆分为**三层正交记忆**，并通过**工作包投影 + 游标检索**实现高效复用：
 
 ```mermaid
 flowchart TB
@@ -90,7 +90,7 @@ flowchart TB
 
 ## 4. 任务分配与单回合执行流
 
-VisHarness 将调色任务拆解为 **Issue → Branch → Module → Fine Group** 五层结构，并通过**单回合复合提交（`photo_stage_turn`）**驱动闭环，避免无谓的确认轮次：
+RetouchAgain 将调色任务拆解为 **Issue → Branch → Module → Fine Group** 五层结构，并通过**单回合复合提交（`photo_stage_turn`）**驱动闭环，避免无谓的确认轮次：
 
 ```mermaid
 sequenceDiagram
