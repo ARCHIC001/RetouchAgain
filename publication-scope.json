@@ -1,10 +1,8 @@
 {
   "schema": "visharness-publication-scope/v1",
-  "document_status": "Publication derivative; not a historical original or experiment result.",
+  "release_type": "public-source-snapshot",
   "source_snapshot_date": "2026-11-13",
   "source_build": "dsh-stage-runtime-v13-20261113",
-  "manual_updates_only": true,
-  "includes_experiment_results": false,
   "includes_photographs": true,
   "example_resources": [
     {
@@ -20,37 +18,22 @@
       "role": "example-base-preview"
     }
   ],
-  "includes_credentials_or_runtime_configuration": false,
-  "includes_third_party_installations_or_full_texts": false,
-  "license_added": false,
-  "runtime_ready": false,
-  "original_source_files_modified_by_export": false,
-  "qualification_warning": "Git clone does not inherit original mtimes, source-records, input qualification, installed dependencies, or paid authorization. Do not forge those records.",
-  "exclusions": [
-    "experiment outputs and trajectories",
-    "all photographs except the three explicitly authorized DSC_3734 example resources; all original-author backups",
-    "third-party source, binaries, models and full-text literature",
-    "runtime configuration, credentials and paid authorization",
-    "historical shadow, migration snapshots and recovery bundles",
-    "local export tools, manifest, state, audits and backups"
+  "external_requirements": [
+    "Compatible DSH runtime (agent / session / llm)",
+    "LightCraft-compatible native imaging backend",
+    "Python imaging packages (Pillow, NumPy, LittleCMS, tifffile)",
+    "Adobe DNG Converter (when RAW-to-DNG conversion is required)",
+    "Model API credentials and runtime authorization config"
   ],
-  "missing_runtime_dependencies": [
-    "DSH installation",
-    "LightCraft-compatible native backend",
-    "Adobe DNG Converter when source conversion is needed",
-    "separate input qualification even for the included example",
-    "frozen textbook and qualification records",
-    "separately configured runtime and disabled-by-default authorization"
-  ],
-  "publication_derivative_changes": {
-    "src/adapt_panorama_display_reference.py": "Remove personal temporary dependency search path; use separately installed tifffile.",
-    "src/dsh_photo_bridge.mjs": "Use VISHARNESS_PYTHON or python instead of a personal interpreter path.",
-    "src/dsh_stage_adapter.mjs": "Retain explicit runtime.python preference, then VISHARNESS_PYTHON or python.",
-    "src/dsh_stage_run.mjs": "Retain explicit runtime.python preference, then VISHARNESS_PYTHON or python.",
-    "src/lab_timing_experiment.py": "Explicit full-author lookup requires VISHARNESS_FULL_AUTHOR_ROOT.",
-    "src/photo_opacity_contract.py": "Import separately installed tifffile without a personal temporary fallback.",
-    "src/photo_source_router.py": "Use VISHARNESS_DNG_CONVERTER or a documented external placeholder; remove personal dependency search path.",
-    "src/photo_stage_schema.py": "Remove one trailing space, with no algorithm change."
+  "environment_adaptations": {
+    "src/adapt_panorama_display_reference.py": "Imports separately installed tifffile.",
+    "src/dsh_photo_bridge.mjs": "Uses VISHARNESS_PYTHON or python.",
+    "src/dsh_stage_adapter.mjs": "Prefers runtime.python, falling back to VISHARNESS_PYTHON or python.",
+    "src/dsh_stage_run.mjs": "Prefers runtime.python, falling back to VISHARNESS_PYTHON or python.",
+    "src/lab_timing_experiment.py": "Uses VISHARNESS_FULL_AUTHOR_ROOT for explicit full-size author target lookup.",
+    "src/photo_opacity_contract.py": "Imports separately installed tifffile.",
+    "src/photo_source_router.py": "Uses VISHARNESS_DNG_CONVERTER for DNG conversion.",
+    "src/photo_stage_schema.py": "Formatting normalized to LF."
   },
   "synthetic_test_entrypoints": [
     "src/check_photo_stage_tasks.py",
@@ -74,7 +57,7 @@
     },
     {
       "path": "src/adapt_panorama_display_reference.py",
-      "role": "raw-display-contract-publication-derivative"
+      "role": "raw-display-contract"
     },
     {
       "path": "src/build_dsh_module_index.py",
@@ -82,7 +65,7 @@
     },
     {
       "path": "src/dsh_photo_bridge.mjs",
-      "role": "runtime-publication-derivative"
+      "role": "runtime"
     },
     {
       "path": "src/dsh_photo_color.py",
@@ -106,7 +89,7 @@
     },
     {
       "path": "src/dsh_stage_adapter.mjs",
-      "role": "runtime-publication-derivative"
+      "role": "runtime"
     },
     {
       "path": "src/dsh_stage_authorize.py",
@@ -114,7 +97,7 @@
     },
     {
       "path": "src/dsh_stage_run.mjs",
-      "role": "runtime-publication-derivative"
+      "role": "runtime"
     },
     {
       "path": "src/dsh_stage_validation.py",
@@ -134,7 +117,7 @@
     },
     {
       "path": "src/lab_timing_experiment.py",
-      "role": "shared-foundation-publication-derivative"
+      "role": "shared-foundation"
     },
     {
       "path": "src/photo_authorization_window.py",
@@ -170,7 +153,7 @@
     },
     {
       "path": "src/photo_opacity_contract.py",
-      "role": "color-contract-publication-derivative"
+      "role": "color-contract"
     },
     {
       "path": "src/photo_phase_scheduler.py",
@@ -206,7 +189,7 @@
     },
     {
       "path": "src/photo_source_router.py",
-      "role": "raw-contract-publication-derivative"
+      "role": "raw-contract"
     },
     {
       "path": "src/photo_stage_bridge.mjs",
@@ -234,7 +217,7 @@
     },
     {
       "path": "src/photo_stage_schema.py",
-      "role": "algorithm-publication-derivative"
+      "role": "algorithm"
     },
     {
       "path": "src/photo_stage_submission.py",
@@ -286,47 +269,47 @@
     },
     {
       "path": "README.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/architecture.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/memory-and-task-routing.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/observation-and-color.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/operations-and-masks.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/protocol-and-resources.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/scope-and-environment.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/manual-sync.md",
-      "role": "derived-publishing-document"
+      "role": "documentation"
     },
     {
       "path": ".gitignore",
-      "role": "publication-protection"
+      "role": "git-config"
     },
     {
       "path": ".gitattributes",
-      "role": "publication-text-policy"
+      "role": "git-config"
     },
     {
       "path": "publication-scope.json",
-      "role": "publication-inventory"
+      "role": "repository-manifest"
     }
   ]
 }
