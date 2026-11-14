@@ -1,46 +1,51 @@
-# 白平衡：视觉基准、局部复用与跨阶段复核（截至 v20）
+# 白平衡：视觉基准、局部复用与跨阶段复核（v20）
 
-> 发布派生版/非历史原稿。本文补充既有说明，不替换此前正文；描述通用机制，不包含实验结果或收费授权。
+本文档说明 v20 在白平衡诊断分类、原生采样读回、局部蒙版无缝复用以及跨阶段影调耦合复核上的实现细节。
 
-## 1. 判断白平衡问题，而不是追求无条件中性
+## 1. 语境化的白平衡诊断（`review.wb_assessment`）
 
-G2 在实际彩色作者／当前图上重评，不把 Tone 灰度判断当作新颜色证据。`review.wb_assessment` 将三个维度分别记录：
+进入 G2 后，模型在真实彩色图像上重新评估色彩关系，并通过 `review.wb_assessment` 将白平衡判断拆分为三个独立维度，避免“见色就归中性”：
 
-- `reference_status`：`available` 或 `not_available`。有参照时记录 1–2 组独立的作者／当前格号、材质、受光、`neutrality_basis` 及温度／Tint 残差；没有可靠参照时允许空 `reference_pairs`。
-- `target_intent`：`neutral`、`intentional_cast` 或 `uncertain`，附 `intent_reason`。材质自身颜色、环境反射及作者有意氛围不是需要自动消除的色偏。
-- `wb_task_status`：`needed`、`not_needed` 或 `uncertain`。没有任务是合法判断，不强迫修改 WB。
+- **`reference_status`（`available` / `not_available`）**：存在可靠中性参照时，记录 1–2 组独立的作者/当前网格坐标、材质、受光条件、`neutrality_basis` 及冷暖/绿品红残差；画面缺乏可靠中性物时允许 `reference_pairs` 为空。
+- **`target_intent`（`neutral` / `intentional_cast` / `uncertain`）**：结合 `intent_reason` 区分需要消除的技术性偏色与作者刻意营造的氛围色调、材质固有色或环境反光。
+- **`wb_task_status`（`needed` / `not_needed` / `uncertain`）**：明确判断当前是否需要调整白平衡，无需修改时可直接跳过。
 
-`atmosphere.route` 可为 `grading`、`local_wb`、`none` 或 `uncertain`，附理由。暗部／高光氛围可以交给分级，空间分离的偏色可以交局部；不由宿主从文字自动生成参数。
+对于高光/暗部的局部氛围或空间分离的偏色，可通过 `atmosphere.route`（`grading` / `local_wb` / `none` / `uncertain`）显式分流至色彩分级或局部白平衡处理。
 
-上述字段位于 assessment 层级，不应复制成每个 reference pair 的另一套分类。宿主绑定实际 observation、版本、阶段、比较模式和视图范围；模型判断不是测量真值。
+## 2. 实际读回、软步长参考与原生采样（`develop.wbPick`）
 
-## 2. 实际读回、软步长与可选原生采样
+工作包会向模型提供后端读回的真实 WB `mode`、`scale`、`temp`、`tint`：
+- **软步长参考**：对于已确认 Kelvin 标度且基线在 `5000K` 左右的场景，参考以 `150–250K` 作微调量级、`500K+` 配合明确依据作大幅调整，Tint 参考 `3–6` 步长；所有提交均以绝对数值写入。
+- **原生白平衡采样（`develop.wbPick`）**：在 Color 或 Joint 阶段且控件可用时，模型可对具有物理中性依据的区域发起采样（使用完整定向源坐标，底层对定向 `SourceLevel::Thumb` 取 `5×5` 邻域）。宿主会校验返回值、有效 `scale` 以及非 WB 参数未发生意外变动。
 
-工作包提供实际 WB `mode`、`scale`、`temp`、`tint`，不把未知标度假定为 Kelvin。对已确认 Kelvin、约 5000K 的情形，150–250K 可作轻微调整的量级提示，约 500K 及以上应有更明确依据；Tint 约 3–6、2–3 轮也只是软指导，不是硬次数或强制双轴修改。实际提交仍为绝对值。
+## 3. 同一实际蒙版的精确 Patch 与 v19–v20 兼容
 
-Color／Joint 可在控件真实可用时选择 `develop.wbPick`。采样必须有物理中性依据，使用完整定向源坐标；原生采样是定向 `SourceLevel::Thumb` 的 5×5 邻域，不是全分辨率成片测量。宿主验证返回值与实际读回、有效 scale，以及非 WB 设置未改变。静态控件目录本身不足以证明当前源资格；不可用时由模型重新选择合法动作，不伪造采样结果。
+Tone 局部开放 6 项影调字段，Color 局部开放 `Temp / Tint`，Joint 开放全部 8 项。复用同一物理 `mask ID` 时，系统仅对本阶段字段执行精确 patch，完整保留该蒙版上既有的影调、几何、可见性与反相状态。新建蒙版则绑定原生返回的真实 ID 并先执行 `all-20` 中性初始化。
 
-## 3. 同一实际蒙版的精确 patch
+```mermaid
+flowchart LR
+    classDef flowStart fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
+    classDef flowEnd fill:#bfdbfe,stroke:#1d4ed8,color:#172554,stroke-width:2.5px
+    classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef origMemory fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:2px
+    classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
 
-Tone 局部只开放六项影调；Color 局部只开放 Temp／Tint；Joint 可使用这八项。复用同一实际 mask ID 时只 patch 本次字段，保留既有影调、几何、可见性和反相状态。新建使用原生返回真实 ID，并执行 all-20 中性初始化，再写目标值；不能假定 `mask.add` 返回列表末项就是新 ID。
+    Action["局部 WB Typed Action"]:::flowStart --> Case{"目标形态"}:::origVisual
+    Case -->|"蒙版列表为空 + create"| Create["直接凭模型 rationale 新建<br/>(all-20 初始化，无需空复用表单)"]:::origGuard
+    Case -->|"显式指向唯一现存 mask ID + adjust"| Adjust["直接校验并精确 patch Temp/Tint<br/>(缺失重复 wb_local_review 时保留 warning)"]:::origMemory
+    Case -->|"已有蒙版时再次 create"| New["需说明新蒙版的不同用途"]:::flowEnd
+```
 
-截至 v19–v20，重复表单不应阻挡已经明确的合法动作：
+## 4. 结案依据与 G3 债务联动
 
-1. **真实列表为空且明确 create**：局部 WB 新建可使用模型原始 rationale／目标与真实空清单登记依据，不为填写空复用表单另发确认轮。
-2. **明确唯一实际 ID 的 adjust**：当本次 typed action 仅指向一个实际存在的 mask ID，重复 `wb_local_review` 缺失或不合格时，可保留原始说明和 warning，以明确 ID 选择继续校验。宿主没有据此证明两个区域语义相同，也不猜测新几何。
-3. **仍然保留的限制**：未知 ID、阶段外参数仍拒绝；已有蒙版时再 create 仍需解释不同用途，不能把 adjust 兼容当作无理由重复新建许可。
+- **Target 结案**：将白平衡问题标记为 `resolved` 时需具备适用的 `target` 对比依据（支持直接复用同阶段同版本下已记录的有效 `target` 依据）；后续出现新视觉证据时仍可显式 `revise`。
+- **跨阶段关注点**：Color 阶段发生的实际 WB 数值、模式或局部 WB 变更，会自动在原同条 G3 复核债务上追加区域影调与边界关注点，确保进入 Joint 前完成联动检查。
 
-## 4. effect 支持不等于作者匹配
+## 5. 代码入口
 
-父／子 effect 只回答“实际改变了什么”，作者／当前 target 才回答“离目标还有什么差距”。标 resolved 需要适用的当前 target 依据，可复用同阶段同版本已实际记录的依据，不另加普遍确认轮。resolved 也不是永久冻结，新证据可以显式 revise。
+- [`photo_white_balance.py`](../src/photo_white_balance.py)：白平衡 assessment、局部复用、读回上下文与耦合追踪。
+- [`dsh_stage_worker.py`](../src/dsh_stage_worker.py)：合同校验与显式 ID 兼容接线。
+- [`photo_stage_operations.py`](../src/photo_stage_operations.py)：阶段控件权限与蒙版事务。
+- [`check_photo_white_balance.py`](../src/check_photo_white_balance.py)：离线合成检查脚本。
 
-实际 Color WB 变化在原同条 G3 债务上增加区域影调／边界关注，不另造审批队列。Kelvin 温差、Tint、mode、有效 picker 和局部 WB 差异按实际设置判断；被拒提案、零变化不生成执行事实。待复核不冒已解决，也不因 pending 就阻止合法前进。
-
-## 5. 代码入口与边界
-
-- [`photo_white_balance.py`](../src/photo_white_balance.py)：assessment、局部复用、读回上下文与耦合信息。
-- [`dsh_stage_worker.py`](../src/dsh_stage_worker.py)：当前合同与显式 ID 兼容接线。
-- [`photo_stage_operations.py`](../src/photo_stage_operations.py)：阶段权限和蒙版事务。
-- [`check_photo_white_balance.py`](../src/check_photo_white_balance.py)：离线合成检查。
-
-合成检查证明合同和工程保护，不保证模型识别中性材质、采样点选择或目标匹配质量。[v20 使用与版本承接](v20-update-and-usage.md)列出运行前提；[记忆与区域复核](memory-review-v20.md)说明债务和实际引用。
+相关文档：[Tone 阶段机制](tone-guidance-v20.md)、[记忆与区域复核](memory-review-v20.md)、[v20 版本与运行说明](v20-update-and-usage.md)。

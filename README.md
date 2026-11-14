@@ -1,122 +1,167 @@
 # Retouching Your Long-Horizon Professional Photo Again
 
-RetouchAgain is a domain-specific visual agent harness for long-horizon photo retouching. Built on an external agent runtime, it orchestrates iterative visual assessment, tool execution, state tracking, and verification.
-
-Retouching Your Long-Horizon Professional Photo Again（RetouchAgain）是一个面向**图像后期调色与参考图仿色（Color/Tone Matching）**的多轮视觉 Agent 框架。它将专业修图师的工作流抽象为可验证、可回退的工程闭环：让视觉大模型（DSH Agent）专注于看图对比、诊断问题与参数决策，而由确定性的 Python 状态机负责记忆存储、阶段权限隔离、色彩几何契约以及原生后端的原子执行。
+**RetouchAgain** is a domain-specific **visual agent harness** for long-horizon professional photo retouching. Built on an external agent runtime, it decouples high-level visual reasoning from deterministic state governance, perceptual observation contracts, and atomic native execution.
 
 ---
 
-## 1. 分级调色闭环与阶段流转
+## Introduction
 
-为了避免曝光、白平衡与色彩调整互相耦合干扰，RetouchAgain 采用**“先定影调、再调色彩、最后联合精修”**的三阶段架构，并在各阶段之间设置了 4 个全局检查点（`G1`–`G4`）：
+Professional RAW photo retouching and reference-based color/tone matching constitute a **long-horizon, non-commutative, and tightly coupled** sequential decision-making problem. Adjusting global exposure simultaneously shifts perceived contrast, highlight roll-off, and chromatic saturation; dozens of continuous sliders, tone curves, and local masks interact across editing stages, causing early misjudgments to compound along the edit trajectory. Existing approaches struggle at both ends of the spectrum: **feed-forward neural retouching models** (e.g., single-shot LUT or pixel-level filters) lack non-destructive native editability and iterative self-correction, while **unconstrained VLM tool-calling** over raw editing APIs suffers from long-horizon context dilution, cross-stage parameter interference, sticky native tool states, and ungrounded parameter guessing without verifying rendered outcomes.
+
+We argue that reliable long-horizon visual retouching is fundamentally a **harness engineering** problem rather than a single-turn prompting or end-to-end weight-fitting problem. Instead of training a task-specific pixel predictor or modifying the underlying foundation model, **RetouchAgain (VisHarness v20)** introduces a deterministic, domain-specific **visual agent harness** between a multimodal reasoning agent (DSH) and a native imaging backend. The agent focuses exclusively on visual comparison, discrepancy attribution, and parameter selection, while the harness enforces perceptual consistency, memory convergence, and atomic execution boundaries.
+
+Specifically, the RetouchAgain harness is built around four tightly integrated mechanisms:
+- **Phase-Gated Workflow & Attribution Isolation**: Global checkpoints (`G1–G4`) partition editing into `Tone` (Rec.709 unified grayscale, *Neutral-First* ordering, and optional `pre_tone_wb`), `Color` (contextual `wb_assessment` and `develop.wbPick`), and `Joint` residual refinement, decoupling luminance structure (`structure`) from chromatic appearance (`chroma`) with full backtracking support.
+- **Perceptual & Color-Geometry Observation Contract**: A deterministic rendering pipeline enforces `IFD → ActiveArea → DefaultCrop → Orientation` geometry normalization, ICC-to-sRGB color conversion, and full-resolution rendering before downsampling, while `review_anchors` bind `Target` (goal gap) and `Effect` (step outcome) comparisons directly to verified image regions and 4×4 grid metadata.
+- **Tri-Layer Memory Topology & Cross-Phase Review Debt**: Session state is separated into *Tool Knowledge*, a *Proposal Bank* (supporting typed `soft/hard` dependencies and ancestor-chain waiver inheritance), and an *Execution Ledger* (`selected_baseline` version tree and `active_masks_summary`). Each turn projects only a focused `context.work_packet` to prevent context drift, while `photo-review-debt/v2` and atomic `spawn_joint_task` track cross-stage side effects.
+- **Execution Fence & Resumable Close Proofs**: All native mutations pass through a persistent execution fence that enforces `all-20` neutral initialization on newly created Linear/Radial masks and exact stage-scoped patching on same-ID reuse. Verifiable `close_proof` reconstruction and checkpoint continuation enable lossless recovery across interrupted sessions.
+
+---
+
+## 1. 分级调色闭环与阶段流转（v20）
+
+为消除曝光、白平衡与色彩调整之间的耦合干扰，Harness 采用**“先定影调、再调色彩、最后联合精修”**的三阶段架构，并在节点之间设置 4 个全局检查点（`G1`–`G4`）。v20 在 `G1` 与 `Tone` 之间新增了可选的一次性前置粗白平衡（`pre_tone_wb`）及局部边界复核机制：
 
 ```mermaid
 flowchart LR
-    G1(["G1 初诊<br/>目标图 vs 基线 v0"]) --> Tone["Tone 分支<br/>(统一灰度 · 影调)"]
-    Tone -->|"选出最佳影调版"| G2(["G2 色彩重评<br/>目标图 vs 影调版"])
+    classDef flowStart fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
+    classDef flowMid fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+    classDef flowEnd fill:#bfdbfe,stroke:#1d4ed8,color:#172554,stroke-width:2.5px
+    classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
+
+    G1(["G1 初诊<br/>彩色目标图 vs 基线 v0"]):::flowStart --> PreCheck{"严重偏色妨碍影调?"}:::origVisual
+    PreCheck -->|"可选一次窄动作"| PreWB["pre_tone_wb<br/>(仅 wb.temp/tint → 彩色 Effect → Fresh G1)"]:::origGuard
+    PreWB --> Tone
+    PreCheck -->|"直接进入"| Tone["Tone 分支 · Neutral-First<br/>(统一灰度 · whites_blacks 起手)"]:::flowMid
+    Tone -->|"选出最佳影调版"| G2(["G2 色彩重评<br/>wb_assessment 语境诊断"]):::origVisual
     G2 -->|"需要重调影调"| Tone
-    G2 --> Color["Color 分支<br/>(彩色 · 白平衡/HSL/分级)"]
-    Color -->|"选出最佳色彩版"| G3(["G3 综合验收<br/>目标图 vs 色彩版"])
+    G2 --> Color["Color 分支<br/>(彩色 · WB/wbPick/HSL/分级/局部复用)"]:::flowMid
+    Color -->|"选出最佳色彩版"| G3(["G3 综合验收<br/>核查跨阶段债务 & 残差"]):::origVisual
     G3 -->|"影调/色彩退化"| Tone
     G3 -->|"色彩需返修"| Color
-    G3 --> Joint["Joint 分支<br/>(彩色 · 残差联合精修 + 导出)"]
-    Joint -->|"导出实际 JPEG"| G4(["G4 交付确认<br/>目标图 vs 导出 JPEG"])
+    G3 --> Joint["Joint 分支<br/>(残差 & spawn_joint_task 精修 + 导出)"]:::flowMid
+    Joint -->|"导出实际 JPEG"| G4(["G4 交付确认<br/>目标图 vs 导出 JPEG"]):::flowEnd
     G4 -->|"返修（旧确认失效）"| Joint
-    G4 -->|"确认交付 / Partial"| Done(["完成"])
+    G4 -->|"确认交付 / Partial"| Done(["完成 & Close Proof"]):::flowEnd
 ```
 
-- **可控回退**：任意检查点发现问题均可退回上游分支，G4 返修后必须重新导出并实际观察新 JPEG 才能确认交付。
-- **独立结果维度**：流程结束（`complete`）、JPEG 已导出核验、目标部分达成（`partial`）各自独立记录，不把接口调用成功等同于画面达标。
+- **Neutral-First 影调路线**：Tone 阶段推荐 `whites_blacks → exposure → highlights_shadows → contrast → master_curve → parametric_curve → local_tone → closure`，先立黑白锚点与中灰骨架，再做局部光影。
+- **可控回退与独立维度**：任意检查点均可退回上游分支（G4 返修后需重新导出并观察新 JPEG）；流程完结（`complete`）、JPEG 核验与目标部分达成（`partial`）各自独立记录。
 
 ---
 
-## 2. 视觉观察与色彩/几何管线
+## 2. 视觉观察、归因隔离与色彩/几何管线
 
-模型每一轮的判断质量取决于输入图像的色彩与几何一致性。RetouchAgain 在观察层严格区分图像角色、色彩空间与对比类型：
+模型每一轮的判断精度取决于输入图像的色彩、几何与对比语境。Harness 在观察层严格规范图像角色、色彩空间转换与物理/色彩归因分离（`tone_assessment`）：
 
 ```mermaid
 flowchart TB
-    subgraph Input["输入与全分辨率渲染"]
-        RAW["RAW / 中间源<br/>IFD → ActiveArea → DefaultCrop → Orientation"] --> Render["后端全分辨率渲染<br/>(LinearRaw / DNG Opacity 白底合成)"]
-        Target["作者成片目标<br/>(Display P3 → 真实 ICC 转 sRGB)"]
+    classDef flowStart fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
+    classDef flowMid fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+    classDef flowEnd fill:#bfdbfe,stroke:#1d4ed8,color:#172554,stroke-width:2.5px
+    classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef origMemory fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:2px
+
+    subgraph Input["数据输入与全分辨率渲染（蓝色主干流）"]
+        RAW["RAW / 中间源<br/>IFD → ActiveArea → DefaultCrop → Orientation"]:::flowStart --> Render["后端全分辨率渲染<br/>(LinearRaw / DNG Opacity 白底合成)"]:::flowMid
+        Target["作者成片目标<br/>(Display P3 → 真实 ICC 转 sRGB)"]:::flowStart
     end
 
-    subgraph Derive["观察图派生 (upright · RGB8 · sRGB PNG · 剥离 EXIF)"]
-        Render -->|"Tone 阶段"| Gray["Rec.709 统一灰度转换<br/>(剥离色彩干扰)"]
-        Render -->|"G1-G4 / Color / Joint"| RGB["彩色 sRGB 派生"]
-        Target -->|"Tone 阶段"| GrayT["目标灰度派生"]
-        Target -->|"其余阶段"| RGBT["目标彩色派生"]
+    subgraph Derive["观察派生与归因隔离（琥珀金：原创视觉机制）"]
+        Render -->|"Tone 阶段"| Gray["Rec.709 统一灰度转换<br/>(剥离色彩干扰)"]:::origVisual
+        Render -->|"G1–G4 / Color / Joint"| RGB["彩色 sRGB 派生"]:::flowMid
+        Target -->|"Tone 阶段"| GrayT["目标灰度派生"]:::origVisual
+        Target -->|"其余阶段"| RGBT["目标彩色派生"]:::flowMid
+        Gray & GrayT & RGB & RGBT --> PNG["upright · RGB8 · sRGB PNG (剥离 EXIF)<br/>总览最长边 ≤ 512 / 局部 ROI ≤ 384"]:::flowEnd
     end
 
-    subgraph Compare["双图对比与 ROI 聚焦"]
-        Gray & GrayT --> Pair["每次投递两张图<br/>总览最长边 ≤ 512 / 局部 ROI ≤ 384<br/>附带 4×4 网格元数据"]
-        RGB & RGBT --> Pair
-        Pair --> TargetCmp["Target 对比: 目标图 vs 当前版<br/>(回答: 离目标还差什么)"]
-        Pair --> EffectCmp["Effect 对比: 父版本 vs 子版本<br/>(回答: 这步操作改变了什么)"]
+    subgraph Compare["双图对比与锚点绑定（翠绿：原创锚点与记忆绑定）"]
+        PNG --> Anchors["review_anchors 真实绑定<br/>(target/protected · explicit_cells/full_frame · 4×4 网格)"]:::origMemory
+        Anchors --> TargetCmp["Target 对比: 目标图 vs 当前版<br/>(tone_assessment 区分 structure / chroma 归因)"]:::origVisual
+        Anchors --> EffectCmp["Effect 对比: 父版本 vs 子版本<br/>(tone_boundary_review 检查核心/羽化/区外保护)"]:::origVisual
     end
 ```
 
-- **Tone 灰度隔离**：Tone 阶段通过统一的非线性/线性亮度公式将对比图转为灰度，确保模型专注影调层次而不被色偏误导。
-- **跨图 ROI 资格**：`Effect` 对比在同一画布上直接复用父子 ROI；`Target` 局部对比则分别定位参考 ROI 与源 ROI，结合材质与受光角色确认可比性，并同步检查羽化邻域与区外保护区。
+- **归因隔离（`structure` vs `chroma`）**：G1 与 Tone 阶段显式区分“真实影调结构差距”和“由色度/饱和度引起的明暗观感差异”，把后者留给 HSL-L 或色彩分支处理。
+- **语境化白平衡（`wb_assessment`）**：G2 区分 `target_intent`（中性参考 vs 作者刻意氛围 `intentional_cast`）与 `atmosphere.route`（交由 `grading` 或 `local_wb`），避免机械消色偏。
 
 ---
 
-## 3. 记忆存储、建议库与复用机制
+## 3. 记忆拓扑、工作包复用与 `photo-review-debt/v2`
 
-在长达数十轮的调色过程中，直接把全量历史和菜单塞进上下文会迅速稀释注意力。RetouchAgain 将会话状态拆分为**三层正交记忆**，并通过**工作包投影 + 游标检索**实现高效复用：
+为防止长程多轮对话稀释注意力，Harness 将会话状态拆分为**三层正交记忆**，并在 v20 引入 **`active_masks_summary`**、**`selected_baseline` 真实链**与 **逐焦点复核债务（`photo-review-debt/v2`）**：
 
 ```mermaid
 flowchart TB
-    subgraph Memory["权威会话三层记忆 (Python Worker)"]
-        TK["1. 工具知识<br/>阶段控件白名单 / 单位 / 原生范围"]
-        PB["2. 建议库 (Proposal Bank)<br/>Issue 诊断 · Fine Group 参数 · 软依赖<br/>状态: active / needs_reassessment / resolved"]
-        EL["3. 执行账本 (Execution Ledger)<br/>版本树 (Parent→Child) · 读回参数<br/>五字段预期 · Review Debt 复核债务"]
+    classDef flowStart fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
+    classDef flowMid fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+    classDef flowEnd fill:#bfdbfe,stroke:#1d4ed8,color:#172554,stroke-width:2.5px
+    classDef origMemory fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:2px
+    classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
+    classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+
+    subgraph Memory["权威会话三层记忆（翠绿：原创记忆拓扑）"]
+        TK["1. 工具知识<br/>阶段权限 / 单位 / 原生范围"]:::origMemory
+        PB["2. 建议库 (Proposal Bank)<br/>Issue & 稳定 task_groups · Typed 依赖 (soft/hard)<br/>Waiver 沿祖先链继承 · 遗漏不自动 retire"]:::origMemory
+        EL["3. 执行账本 (Execution Ledger)<br/>selected_baseline (root→selected 真实链)<br/>active_masks_summary (center<0.1 提醒)"]:::origMemory
     end
 
-    subgraph Reuse["上下文投影与分支复用"]
-        WP["每轮工作包 (Working Package)<br/>• 当前焦点 Group<br/>• 上一步完整五字段预期<br/>• 待复核债务 & 少量下一候选"]
-        Cursor["历史与长文本<br/>游标分页按需检索"]
-        Revert["版本回退处理<br/>保留版本树，废弃分支债务标为<br/>not_applicable_selected_branch"]
+    subgraph Flow["工作包投影与跨阶段债务流转（蓝色流 + 珊瑚红派生）"]
+        TK & PB & EL --> WP["context.work_packet 唯一正文<br/>• 焦点 Group & 上一步五字段预期<br/>• 历史参数与弃支折为可检索索引"]:::flowMid
+        EL -->|"真实操作触发"| Debt["photo-review-debt/v2<br/>(绑定稳定 focus_id & review_region)"]:::origVisual
+        Debt -->|"no_regression / minor_acceptable"| Settled(["resolved / accepted_tradeoff"]):::flowEnd
+        Debt -->|"spawn_joint_task"| JointSpawn["原子创建 joint-from:<debt_id><br/>(仅存证据与保护关系，待模型补方案)"]:::origGuard
+        EL -->|"跨分支选版"| Reset["记录 BRANCH RESET NOTICE<br/>废弃分支 pending 标为不适用"]:::origGuard
     end
-
-    TK & PB & EL --> WP
-    EL -.->|"不塞满上下文"| Cursor
-    EL -->|"选回早期更佳版本"| Revert
-    PB -->|"上游曝光/WB/蒙版几何大改"| Reassess["自动标记下游 Group:<br/>needs_reassessment"]
 ```
 
-- **动态重评而非盲目重放**：当上游曝光、全局白平衡或共享蒙版几何发生显著调整时，下游关联的 HSL 或色彩分级建议会被标记为 `needs_reassessment`，引导模型基于新画面重新计算数值。
-- **跨阶段复核债务（Review Debt）**：Tone 引起的色彩偏移会在 G2 结算，Color 对明暗的副作用会在 G3 结算，确保跨阶段修改不留死角。
+- **Typed 依赖与 Waiver 继承**：支持 `soft / hard`、`disposition / effect` 精确依赖约束；`soft skip / retire` 的豁免记录可沿选中祖先链自动继承。
+- **跨阶段复核债务**：Tone 引起的色彩/边界问题进入 G2 债务，Color 的 WB 与 HSL-L 亮度副作用进入 G3 债务；发现跨阶段问题可通过 `spawn_joint_task` 原子派生 Joint 精修任务。
 
 ---
 
-## 4. 任务分配与单回合执行流
+## 4. 任务分配、原子事务与单回合执行流
 
-RetouchAgain 将调色任务拆解为 **Issue → Branch → Module → Fine Group** 五层结构，并通过**单回合复合提交（`photo_stage_turn`）**驱动闭环，避免无谓的确认轮次：
+Harness 将调色任务拆解为 **Issue → Branch → Module → Fine Group**，并通过单回合 `photo_stage_turn` 完成“复核 → 更新建议库 → 选组 → 执行”闭环，同时提供**闭合证明（`close_proof`）与检查点续接（`continuation`）**：
 
 ```mermaid
 sequenceDiagram
-    participant Agent as DSH Agent
-    participant Adapter as JS Adapter / Schema
-    participant Worker as Python 状态机
-    participant Native as 原生图像后端
+    autonumber
+    box rgba(237, 233, 254, 0.5) 决策与适配层
+        participant Agent as DSH Agent
+        participant Adapter as JS Adapter / Schema
+    end
+    box rgba(209, 250, 229, 0.5) 原创 Harness 状态机与护栏
+        participant Worker as Python 状态机 (v20)
+    end
+    box rgba(239, 246, 255, 0.7) 原生执行后端
+        participant Native as 原生图像后端
+    end
 
-    Worker->>Adapter: 投影当前阶段合同 + 工作包 + 双图 PNG
+    Worker->>Adapter: 投影当前阶段合同 + context.work_packet + 双图 PNG
     Adapter->>Agent: 发起单回合推理请求
-    Agent-->>Adapter: 提交 photo_stage_turn<br/>(review + bank_delta + selected_group + action + 5字段预期)
-    Adapter->>Worker: 幂等规范化 (raw / canonical / warnings)
-    Worker->>Worker: 校验阶段权限 / 参数单位 / 软依赖 Override
-    alt 校验不通过（未进入写入）
-        Worker-->>Agent: 保留合法 bank 更新，仅返回动作修正提示
-    else 校验通过
-        Worker->>Native: 执行全局更新或蒙版原子事务<br/>(绑定真实 ID → all-20 中性初始化 → 写入目标字段)
-        Native-->>Worker: 读回实际 DevelopSettings + 全分辨率渲染
-        Worker->>Worker: 记录父子版本并生成下一轮观察图
+    Agent-->>Adapter: 提交 photo_stage_turn<br/>(review / anchors / bank_delta / selected_group / action)
+
+    rect rgba(254, 243, 199, 0.45)
+        Note over Adapter,Worker: v20 幂等规范化与容错分流
+        Adapter->>Worker: 保留 raw/canonical/warnings (如 anchor 回落 unknown / 唯一别名归一)
+        Worker->>Worker: 校验阶段权限、Typed 依赖、不适用 debt batch 隔离
+    end
+
+    alt 校验不通过（no-effect，未进入原生写入）
+        Worker-->>Agent: 保留合法 bank 更新，仅返回结构/动作修正反馈
+    else 通过 Execution Fence 校验
+        rect rgba(255, 228, 230, 0.45)
+            Note over Worker,Native: 原子事务与同 ID 局部复用
+            Worker->>Native: 全局更新 / develop.wbPick / 蒙版事务<br/>(新建绑定真实 ID → all-20 中性初始化；复用仅 patch 本阶段字段)
+            Native-->>Worker: 读回实际 DevelopSettings + 全分辨率渲染
+        end
+        Worker->>Worker: 更新版本树、close_proof 闭合证明与下一轮观察图
     end
 ```
 
-- **软依赖与灵活路由**：默认路线（如 Tone 先曝光后曲线）仅作为推荐顺序；模型只要给出清晰的 `override_reason`，即可跳过常规顺序优先处理画面瓶颈，或对同一细组进行多轮迭代。
-- **蒙版原子事务**：新建 Linear/Radial 蒙版时，宿主会先绑定原生真实 ID 并对全部 20 个局部字段执行中性归零（`amount=100`，其余 19 项置 `0`），彻底消除原生工具的历史滑杆记忆，随后再写入本轮目标字段；跨阶段复用同一物理蒙版时则保留既有参数，只增量更新当前阶段字段。
+- **同 ID 局部蒙版复用（v19–v20）**：复用既有 `mask ID` 时仅 patch 当前阶段字段（Tone 6 项、Color `Temp/Tint`、Joint 8 项），保留已有参数与几何；当 `typed action` 明确指向唯一现存 `mask ID` 或空列表新建时，自动兼容跳过冗余表单阻塞。
 
 ---
 
@@ -138,9 +183,13 @@ sequenceDiagram
 |---|---|
 | [系统架构](docs/architecture.md) | 分层架构、G1–G4 检查点、细组组织与单回合复合提交 |
 | [工作记忆与任务路由](docs/memory-and-task-routing.md) | 建议库数据结构、状态维度、软依赖 Override 与复核债务 |
+| [记忆拓扑与区域复核（v20）](docs/memory-review-v20.md) | Typed 依赖、活跃蒙版链、`photo-review-debt/v2` 与提交容错 |
+| [Tone 阶段机制（v20）](docs/tone-guidance-v20.md) | 差距归因隔离、Neutral-First 路线、`pre_tone_wb` 与边界交接 |
+| [白平衡机制（v20）](docs/white-balance-v20.md) | `wb_assessment` 语境诊断、`develop.wbPick` 与同 ID 局部复用 |
 | [观察与色彩契约](docs/observation-and-color.md) | 图像角色、ICC 转换、RAW 几何、灰度公式与 ROI 对齐 |
 | [操作与蒙版机制](docs/operations-and-masks.md) | 阶段控件白名单、参数单位、Linear/Radial 几何与 all-20 初始化 |
 | [通信协议与资源控制](docs/protocol-and-resources.md) | 四层协议、64K 配额、50 步编排模板、四维计数与授权周期 |
+| [v20 版本与运行说明](docs/v20-update-and-usage.md) | `dsh-stage-runtime-v20` 标识、闭合证明、检查点续接与新增测试 |
 | [环境搭建与运行范围](docs/scope-and-environment.md) | 外部依赖说明、环境变量配置与离线合成测试入口 |
 | [导出与同步指南](docs/manual-sync.md) | 维护者导出筛选、静态检查与 Git 推送流程 |
 
@@ -149,40 +198,30 @@ sequenceDiagram
 ## 7. 核心源码与离线测试
 
 ### 主要模块入口
-- `src/dsh_stage_run.mjs`：主循环运行入口，串联 DSH Agent 与阶段状态机。
-- `src/dsh_stage_adapter.mjs`：模型请求封装、Schema 动态校验与回执诊断。
+- `src/dsh_stage_run.mjs` / `src/dsh_stage_adapter.mjs`：主循环运行入口、Schema 动态校验与回执诊断。
 - `src/dsh_stage_worker.py`：核心状态机，管理阶段流转、版本树、建议库与执行账本。
-- `src/photo_stage_tasks.py` / `src/photo_proposal_bank.py`：任务注册、软依赖解析与工作包构建。
+- `src/photo_stage_tasks.py` / `src/photo_proposal_bank.py` / `src/photo_working_context.py`：任务注册、Typed 依赖、活跃蒙版摘要与工作包构建。
+- `src/photo_review_anchors.py` / `src/photo_phase_scheduler.py`：区域锚点绑定与 `photo-review-debt/v2` 跨阶段债务调度。
+- `src/photo_tone_guidance.py` / `src/photo_pre_tone.py` / `src/photo_white_balance.py`：Tone 归因引导、`pre_tone_wb` 与白平衡诊断复用。
 - `src/photo_stage_schema.py` / `src/photo_stage_operations.py`：动态提交合同与蒙版原子事务。
+- `src/photo_stage_close_proof.py` / `src/photo_stage_continuation.py`：闭合证明重建与检查点无缝续接。
 - `src/photo_stage_observation.py` / `src/photo_image_contract.py` / `src/raw_render_contract.py`：色彩、ICC、RAW 几何与灰度观察图派生。
 
 ### 运行离线合成测试
-在安装 `Pillow` 和 `NumPy` 后，可直接运行以下 5 个脚本验证核心状态机、操作权限与调度逻辑（使用合成夹具，无需外部模型或原生后端）：
+在安装 `Pillow` 和 `NumPy` 后，可直接运行以下 **11 个离线合成测试脚本**验证核心状态机、v20 引导机制、闭合证明与调度逻辑（使用合成夹具，无需外部模型或原生后端）：
 
 ```bash
+python -I -B -X utf8 src/check_photo_working_context.py
+python -I -B -X utf8 src/check_photo_review_anchors.py
+python -I -B -X utf8 src/check_photo_tone_guidance.py
+python -I -B -X utf8 src/check_photo_white_balance.py
 python -I -B -X utf8 src/check_photo_stage_tasks.py
 python -I -B -X utf8 src/check_photo_stage_operations.py
 python -I -B -X utf8 src/check_photo_stage_schema.py
 python -I -B -X utf8 src/check_photo_phase_workflow.py
 python -I -B -X utf8 src/check_photo_stage_continuation.py
+python -I -B -X utf8 src/check_dsh_stage_phase_worker_synthetic.py
+python -I -B -X utf8 src/check_photo_stage_close_proof_synthetic.py
 ```
 
 详细依赖与环境变量（`VISHARNESS_PYTHON`、`VISHARNESS_FULL_AUTHOR_ROOT`、`VISHARNESS_DNG_CONVERTER`）配置请参见 [环境搭建与运行范围](docs/scope-and-environment.md)，完整文件清单见 [publication-scope.json](publication-scope.json)。
-
-
----
-
-## 8. 截至 v20 的新增设计与使用说明
-
-> 发布派生版/非历史原稿。本节为追加更新；前文经过优化的说明完整保留。
-
-当前源码为 `dsh-stage-runtime-v20-20261114`／资源 `stage-resource/v20`，外层协议 v2、动态阶段合同 v3。新增内容集中在以下独立说明，不回改前文：
-
-- [白平衡：视觉基准、实际读回与同ID局部复用](docs/white-balance-v20.md)
-- [Tone：归因隔离、neutral-first与边界交接](docs/tone-guidance-v20.md)
-- [记忆：依赖、真实分支、区域focus与稳定引用](docs/memory-review-v20.md)
-- [v20使用前提、闭合续接与追加式维护](docs/v20-update-and-usage.md)
-
-新增 Tone 路线优先黑白场支撑后建立中灰骨架；原字符串软依赖仍兼容，typed依赖区分soft／hard与处置／实际effect。待复核债务不自动冒已解决，也不以不合格的附带表单阻挡无关合法动作。前文五个合成入口之外的新增入口以 [publication-scope.json](publication-scope.json) 为准。
-
-独立合成测试、工具执行成功和工作流complete都不等于摄影目标达成或作者认可。仓库不附带现场资格、收费授权、实验结果或第三方安装；已有示例三文件范围不扩展。

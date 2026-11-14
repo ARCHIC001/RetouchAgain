@@ -1,53 +1,63 @@
-# Tone：归因隔离、neutral-first 与边界交接（截至 v20）
+# Tone：归因隔离、Neutral-First 路线与边界交接（v20）
 
-> 发布派生版/非历史原稿。以下为追加的当前机制，不重写既有设计叙述，不包含实验记录。
+本文档说明 v20 在 Tone 阶段的差距归因分类、Neutral-First 推荐调色顺序、可选前置粗白平衡（`pre_tone_wb`）以及局部边界交接机制。
 
-## 1. G1 先分类，不限制后续建议
+## 1. G1 差距归因与权限解耦
 
-G1 彩色总观察可以提出任何后续阶段的判断、建议和参数，Harness 负责按 issue／branch／module／fine group 保存和组织；提前谈颜色不构成整轮拒绝理由。建议存储和实际执行是两个权限面，存下 Color 建议不会让 G1 获得通用编辑权限。
+G1 彩色初诊阶段可以提出覆盖后续所有阶段（包括 Color 与 Joint）的诊断与参数建议，由 Harness 按 `issue / branch / module / fine group` 分类存入建议库；建议存储与实际执行权限解耦，提前规划颜色方案不会越权触发编辑。
 
-`review.tone_assessment` 记录作者区域、当前区域、材质、受光、证据、保护目标和 handoff。`attribution` 仅为 `structure`、`chroma` 或 `uncertain`，可以随后据实图修订。颜色性明暗可交给 HSL-L／颜色工作，不以全局曝光替代所有色彩差异。黑场、白场和中灰锚点须带资格限制，不自动当作纯黑、纯白或标准色卡；允许没有可靠锚点。
+模型通过 `review.tone_assessment` 记录参考/当前区域、材质、受光、保护目标与 handoff，并对明暗差距给出明确归因（`attribution`）：
+- **`structure`**：真实的影调结构与反差差距，留在 Tone 阶段解决。
+- **`chroma`**：由色彩饱和度或色相明度引起的观感明暗差异，交由后续 HSL-L 或色彩分支处理。
+- **`uncertain`**：暂不确定，可随后续真实观察修订。
 
-Tone 统一执行 sRGB 解码、线性 `Y=.2126R+.7152G+.0722B`、sRGB 编码并复制到 RGB 三通道。它是可重复的亮度派生，不是绝对感知亮度无损；没有 auto-level 或独立直方图匹配，也不修改 RAW 设置和彩色母版。RGB 目标无法证明作者使用过某一个具体工具。
+Tone 阶段在观察层统一执行 sRGB 解码 → `Y = 0.2126R + 0.7152G + 0.0722B` → 灰度 sRGB 编码并同步至三通道，保证双图亮度对比一致且不改变后端彩色母版。
 
-## 2. neutral-first 是软路线
+## 2. Neutral-First 推荐路线与曲线约束
 
-截至 v15 后的 Tone 推荐顺序为：
+v15 起，Tone 阶段采用 **Neutral-First** 推荐顺序，优先建立黑白端支撑与中灰骨架：
 
-`whites_blacks → exposure → highlights_shadows → contrast → master_curve → parametric_curve → local_tone → closure`
+```text
+whites_blacks → exposure → highlights_shadows → contrast → master_curve → parametric_curve → local_tone → closure
+```
 
-它优先建立端点支撑和中灰骨架，不强迫调遍菜单，不强推 0／1 端点。细组可以多轮小步修改，也可根据实际瓶颈显式改优先级、说明跳步理由。既有文档中的旧示例顺序应结合本追加说明理解；18 或总体规划次数不是摄影动作硬 cap。
+该路线作为默认排序提示，模型可根据实际画面瓶颈灵活调整优先级、跳过无关模块或对同一细组多轮微调。Tone 阶段的 Master 点曲线支持 `[]` 重置，或 `2–5` 个控制点（`x` 严格递增、`y` 单调不减），统一映射 `settings.curve.master` 与 `develop.curve`。
 
-Tone 的 Master 曲线允许 `[]` reset，或 2–5 个点，x 严格递增、y 不下降；不自动补点、裁点、固定端点或生成复杂波浪。`settings.curve.master` 与 `develop.curve` 两入口语义一致，Joint 的既有范围不因 Tone 限制被偷偷改变。
+## 3. 可选的一次性前置粗 WB（`pre_tone_wb`）
 
-## 3. 可选的一次前置粗 WB
+当源图存在严重偏色、直接影响影调基准判断时，模型可在 G1 阶段选择触发一次性的窄动作 `pre_tone_wb`：
 
-若严重偏色确实妨碍影调基础判断，G1 可选择窄 action `pre_tone_wb`，不是新增 workflow phase：
+```mermaid
+flowchart LR
+    classDef flowStart fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
+    classDef flowEnd fill:#bfdbfe,stroke:#1d4ed8,color:#172554,stroke-width:2.5px
+    classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
+    classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
 
-- 显式 base_version，只提交动态合同允许的 `wb.temp`／`wb.tint` scalars，至少一项；不开放 G1 通用 settings、commands、picker 或 mask。
-- 需要明确 WB 任务、tone_basis_impact、编辑预期与显式细组。
-- 一次资格按实际成功消耗；已知未执行不消耗，inflight／unknown 不重放。reload、选父版或检查点续接不能清掉记录。
-- 成功后先看实际彩色 effect，再用 fresh G1 完整 target 重建影调判断，才进入 Tone；G2 正常保留。
+    G1["G1 彩色初诊<br/>严重偏色影响影调判断"]:::flowStart -->|"可选窄动作 pre_tone_wb<br/>仅调整 wb.temp / wb.tint"| Apply["绑定显式 base_version 写入<br/>(消耗一次 pre_tone_wb 资格)"]:::origGuard
+    Apply --> Eff["彩色 Effect 复核<br/>确认白平衡粗调结果"]:::origVisual
+    Eff --> FreshG1["Fresh G1 彩色 Target<br/>重新建立影调判断"]:::origVisual
+    FreshG1 --> Tone(["正式进入 Tone 阶段"]):::flowEnd
+```
 
-不用前置 WB 是默认合法路径，不为测试该字段强迫额外请求。
+- **动作约束**：必须显式指定 `base_version`，仅开放 `wb.temp / wb.tint` 标量（至少一项），并附带 `tone_basis_impact` 与预期说明。
+- **一次资格管理**：资格仅在实际执行成功后消耗（校验失败未写入时不消耗，`reload`、选父版或检查点续接均保留已消耗状态）。默认无严重偏色时直接跳过此步进入 Tone。
 
-## 4. 局部边界和跨阶段债务
+## 4. 局部边界复核与跨阶段交接
 
-Tone 局部除目标区外，还记录保护边界、羽化邻域和区外区域。实际父／子复核用 `review.tone_boundary_review` 评估 `protected`、`affected` 或 `uncertain`；细边界残差可交同 issue 的 Joint 组，不自动生成另一张蒙版或新几何。
+Tone 局部蒙版除了评估目标区域外，还通过 `review.tone_boundary_review` 复核保护边界、羽化邻域与区外区域的受影响状态（`protected` / `affected` / `uncertain`）：
+- **细边界交接**：Tone 遗留的细边界残差可直接转交同一 Issue 下的 Joint 细组处理，无需重复新建蒙版。
+- **跨阶段债务**：Tone 导致的色彩或边界副作用进入 G2 复核债务；Color 阶段实际修改 HSL-L 带来的明暗变化则进入 G3 复核债务。
 
-Tone 的颜色／边界后果进入原同条 G2 债务；实际 Color HSL-L 的影调保护进入原同条 G3 债务，并与 WB 关注并存。任务路由不是效果已经改善的证明，pending 也不等于必须先消债才能进行下一合法动作。
+## 5. 提交格式兼容
 
-## 5. 公开提交兼容不改变摄影参数
-
-v18 起，指定叙述字段中的 string list 可作可逆 JSON 文本规范化；允许的附带叙述、排序提示及重复模块声明保留原文和 warning，而不是付费整理格式。Light 家族别名仅处理组织声明，实际 typed action 决定执行覆盖。
-
-原输入、canonical 和 warning 分开留存。未知 Native 字段不静默剥离，必需信息不从散文猜补，空调用仍拒绝。归因记录完整、接口执行成功，都不能替代实际作者对照与独立摄影判断。
+v18 起，规范化层支持将指定叙述字段中的 `string list` 做可逆 JSON 文本整理，保留允许的附带叙述、排序提示与重复模块声明（附带 `warning`），并规范化 Light 家族组织别名，具体参数写入仍严格以 `typed action` 为准。
 
 ## 6. 代码入口
 
-- [`photo_tone_guidance.py`](../src/photo_tone_guidance.py)：归因记录、保护边界和实际 HSL-L 差异。
-- [`photo_pre_tone.py`](../src/photo_pre_tone.py)：一次资格、后果复核、退出和续接检查。
-- [`photo_stage_submission.py`](../src/photo_stage_submission.py)：公开结构规范化，不能猜改 Native 参数。
-- [`check_photo_tone_guidance.py`](../src/check_photo_tone_guidance.py)：离线合成检查。
+- [`photo_tone_guidance.py`](../src/photo_tone_guidance.py)：归因分类、边界复核与 HSL-L 差异追踪。
+- [`photo_pre_tone.py`](../src/photo_pre_tone.py)：`pre_tone_wb` 资格控制、后果复核与续接校验。
+- [`photo_stage_submission.py`](../src/photo_stage_submission.py)：提交结构规范化。
+- [`check_photo_tone_guidance.py`](../src/check_photo_tone_guidance.py)：离线合成检查脚本。
 
-另见[白平衡](white-balance-v20.md)、[记忆与区域复核](memory-review-v20.md)及[使用前提](v20-update-and-usage.md)。
+相关文档：[白平衡机制](white-balance-v20.md)、[记忆与区域复核](memory-review-v20.md)、[v20 版本与运行说明](v20-update-and-usage.md)。

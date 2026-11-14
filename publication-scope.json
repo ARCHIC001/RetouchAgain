@@ -3,6 +3,8 @@
   "release_type": "public-source-snapshot",
   "source_snapshot_date": "2026-11-14",
   "source_build": "dsh-stage-runtime-v20-20261114",
+  "resource_profile": "stage-resource/v20",
+  "protocol": "dsh-stage-runtime/v2",
   "includes_photographs": true,
   "example_resources": [
     {
@@ -48,6 +50,17 @@
     "src/check_dsh_stage_phase_worker_synthetic.py",
     "src/check_photo_stage_close_proof_synthetic.py"
   ],
+  "synthetic_test_notes": {
+    "src/check_dsh_stage_phase_worker_synthetic.py": {
+      "source": "src/check_dsh_stage_phase_worker.py",
+      "retained_synthetic_cases": 33,
+      "original_cases": 35,
+      "description": "Synthetic phase-worker verification suite using a stubbed backend (2 field-trace replay cases from the original suite omitted)."
+    },
+    "src/check_photo_stage_close_proof_synthetic.py": {
+      "description": "Synthetic verification for request, receipt, and action-close proof reconstruction."
+    }
+  },
   "files": [
     {
       "path": "paired photos/DSC_3734/DSC_3734.NEF",
@@ -63,7 +76,7 @@
     },
     {
       "path": "src/adapt_panorama_display_reference.py",
-      "role": "raw-display-contract-publication-derivative"
+      "role": "raw-display-contract"
     },
     {
       "path": "src/build_dsh_module_index.py",
@@ -71,7 +84,7 @@
     },
     {
       "path": "src/dsh_photo_bridge.mjs",
-      "role": "runtime-publication-derivative"
+      "role": "runtime"
     },
     {
       "path": "src/dsh_photo_color.py",
@@ -95,7 +108,7 @@
     },
     {
       "path": "src/dsh_stage_adapter.mjs",
-      "role": "runtime-publication-derivative"
+      "role": "runtime"
     },
     {
       "path": "src/dsh_stage_authorize.py",
@@ -103,7 +116,7 @@
     },
     {
       "path": "src/dsh_stage_run.mjs",
-      "role": "runtime-publication-derivative"
+      "role": "runtime"
     },
     {
       "path": "src/dsh_stage_validation.py",
@@ -127,7 +140,7 @@
     },
     {
       "path": "src/lab_timing_experiment.py",
-      "role": "shared-foundation-publication-derivative"
+      "role": "shared-foundation"
     },
     {
       "path": "src/photo_authorization_window.py",
@@ -163,7 +176,7 @@
     },
     {
       "path": "src/photo_opacity_contract.py",
-      "role": "color-contract-publication-derivative"
+      "role": "color-contract"
     },
     {
       "path": "src/photo_phase_scheduler.py",
@@ -199,7 +212,7 @@
     },
     {
       "path": "src/photo_source_router.py",
-      "role": "raw-contract-publication-derivative"
+      "role": "raw-contract"
     },
     {
       "path": "src/photo_stage_bridge.mjs",
@@ -231,7 +244,7 @@
     },
     {
       "path": "src/photo_stage_schema.py",
-      "role": "algorithm-publication-derivative"
+      "role": "algorithm"
     },
     {
       "path": "src/photo_stage_submission.py",
@@ -319,63 +332,63 @@
     },
     {
       "path": "src/check_dsh_stage_phase_worker_synthetic.py",
-      "role": "synthetic-test-publication-derivative"
+      "role": "synthetic-test"
     },
     {
       "path": "src/check_photo_stage_close_proof_synthetic.py",
-      "role": "synthetic-test-publication-derivative"
+      "role": "synthetic-test"
     },
     {
       "path": "README.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/architecture.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/memory-and-task-routing.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/observation-and-color.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/operations-and-masks.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/protocol-and-resources.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/scope-and-environment.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/manual-sync.md",
-      "role": "derived-publishing-document"
+      "role": "documentation"
     },
     {
       "path": "docs/white-balance-v20.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/tone-guidance-v20.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/memory-review-v20.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": "docs/v20-update-and-usage.md",
-      "role": "derived-method-document"
+      "role": "documentation"
     },
     {
       "path": ".gitignore",
-      "role": "publication-protection"
+      "role": "git-config"
     },
     {
       "path": ".gitattributes",
@@ -383,24 +396,7 @@
     },
     {
       "path": "publication-scope.json",
-      "role": "publication-inventory"
+      "role": "repository-manifest"
     }
-  ],
-  "resource_profile": "stage-resource/v20",
-  "protocol": "dsh-stage-runtime/v2",
-  "synthetic_test_derivatives": {
-    "src/check_dsh_stage_phase_worker_synthetic.py": {
-      "source": "src/check_dsh_stage_phase_worker.py",
-      "retained_synthetic_cases": 33,
-      "original_cases": 35,
-      "excluded_field_cases": [
-        "test_real_r1_second_response_replays_only_on_new_synthetic_state",
-        "test_real_r2_raw_turns_recover_future_reference_and_continue_actual_effect"
-      ],
-      "qualification": "Publication derivative, not the full original suite or photographic evidence. External image-bundle activation is stubbed only for the fake backend; no third-party bundle, decoder or real Native qualification."
-    },
-    "src/check_photo_stage_close_proof_synthetic.py": {
-      "qualification": "Independent synthetic request/receipt/action-close records; no field-run artifacts, model or Native."
-    }
-  }
+  ]
 }
