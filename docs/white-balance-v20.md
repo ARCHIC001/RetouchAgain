@@ -30,10 +30,10 @@ flowchart LR
     classDef origMemory fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:2px
     classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
 
-    Action["局部 WB Typed Action"]:::flowStart --> Case{"目标形态"}:::origVisual
-    Case -->|"蒙版列表为空 + create"| Create["直接凭模型 rationale 新建<br/>(all-20 初始化，无需空复用表单)"]:::origGuard
-    Case -->|"显式指向唯一现存 mask ID + adjust"| Adjust["直接校验并精确 patch Temp/Tint<br/>(缺失重复 wb_local_review 时保留 warning)"]:::origMemory
-    Case -->|"已有蒙版时再次 create"| New["需说明新蒙版的不同用途"]:::flowEnd
+    Action["Local WB Typed Action"]:::flowStart --> Case{"Mask Target State"}:::origVisual
+    Case -->|"Empty Mask List + create"| Create["Create via Model Rationale<br/>(all-20 Neutral Init)"]:::origGuard
+    Case -->|"Unique Existing mask ID + adjust"| Adjust["Validate & Patch Temp/Tint<br/>(Preserve Warning if Review Missing)"]:::origMemory
+    Case -->|"Existing Masks + create"| New["Require Distinct Purpose Rationale"]:::flowEnd
 ```
 
 ## 4. 结案依据与 G3 债务联动

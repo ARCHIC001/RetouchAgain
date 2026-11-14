@@ -31,12 +31,12 @@ flowchart LR
     classDef origMemory fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:2px
     classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
 
-    Turn["收到模型提交"]:::flowStart --> Check{"执行前校验"}:::origVisual
-    Check -->|"不通过 (no-effect)"| Reject["保留当前版本与账本<br/>仅返回修正反馈"]:::origGuard
-    Check -->|"通过"| Fence["通过持久 Execution Fence<br/>写入原生后端"]:::origGuard
-    Fence -->|"状态不明 / Pending"| Pause["保留 Lease 与现场待对账"]:::origGuard
-    Fence -->|"正常完结"| Proof["photo_stage_close_proof.py<br/>基于 request/receipt/账本生成闭合证明"]:::origMemory
-    Proof --> Cont(["photo_stage_continuation.py<br/>在新 Scope 校验设置后继承 Bank/债务/版本树续跑"]):::flowEnd
+    Turn["Agent Submission"]:::flowStart --> Check{"Pre-Execution Validation"}:::origVisual
+    Check -->|"Rejected (no-effect)"| Reject["Preserve State & Ledger<br/>Return Correction Feedback"]:::origGuard
+    Check -->|"Accepted"| Fence["Execution Fence<br/>Mutate Native Backend"]:::origGuard
+    Fence -->|"Pending / Unknown"| Pause["Hold Lease & Reconcile"]:::origGuard
+    Fence -->|"Settled"| Proof["photo_stage_close_proof.py<br/>Reconstruct Close Proof"]:::origMemory
+    Proof --> Cont(["photo_stage_continuation.py<br/>Verify Settings & Resume Scope"]):::flowEnd
 ```
 
 - **闭合证明（[`photo_stage_close_proof.py`](../src/photo_stage_close_proof.py)）**：从实际请求、回执、工作流提交、原生账本与关闭记录重建闭合证明；当动作已结清且无活动标记时，可作为新 scope 的可靠续接依据。

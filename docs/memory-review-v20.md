@@ -32,13 +32,13 @@ flowchart LR
     classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
     classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
 
-    Op["真实操作写入后端"]:::flowStart --> Debt["生成债务条目<br/>(绑定 focus_id & review_region)"]:::origMemory
-    Debt -->|"切离当前祖先链"| Off["标记为分支外不适用<br/>(切回时恢复 pending)"]:::origGuard
-    Debt -->|"视觉复核完成"| Eval{"复核结论"}:::origVisual
-    Eval -->|"no_regression"| Res(["resolved<br/>已确认无回退"]):::flowEnd
-    Eval -->|"minor_acceptable"| Trade(["accepted_tradeoff<br/>明确接受轻微代价"]):::flowEnd
-    Eval -->|"spawn_joint_task"| Joint["reviewed_joint_task<br/>原子创建 joint-from:<debt_id>"]:::origGuard
-    Joint -->|"后续模型显式补全方案并选组"| Exec["在 Joint 阶段执行精修"]:::flowMid
+    Op["Native Mutation Executed"]:::flowStart --> Debt["Create Review Debt<br/>(Bind focus_id & review_region)"]:::origMemory
+    Debt -->|"Switch Off Ancestor Chain"| Off["Mark Off-Branch Inapplicable<br/>(Restore Pending on Revert)"]:::origGuard
+    Debt -->|"Visual Review Complete"| Eval{"Review Outcome"}:::origVisual
+    Eval -->|"no_regression"| Res(["resolved<br/>Verified No Regression"]):::flowEnd
+    Eval -->|"minor_acceptable"| Trade(["accepted_tradeoff<br/>Explicit Tradeoff Accepted"]):::flowEnd
+    Eval -->|"spawn_joint_task"| Joint["reviewed_joint_task<br/>Atomic Spawn joint-from:<debt_id>"]:::origGuard
+    Joint -->|"Agent Plans & Selects Group"| Exec["Refine in Joint Phase"]:::flowMid
 ```
 
 - **原子派生 Joint 任务**：`spawn_joint_task` 会以原子、幂等方式创建 `joint-from:<debt_id>` 诊断节点（初始 `groups: []`），仅承载视觉证据与保护区域关系，后续由模型显式补充参数方案后再执行。

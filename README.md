@@ -30,20 +30,20 @@ flowchart LR
     classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
     classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
 
-    G1(["G1 初诊<br/>彩色目标图 vs 基线 v0"]):::flowStart --> PreCheck{"严重偏色妨碍影调?"}:::origVisual
-    PreCheck -->|"可选一次窄动作"| PreWB["pre_tone_wb<br/>(仅 wb.temp/tint → 彩色 Effect → Fresh G1)"]:::origGuard
+    G1(["G1 Initial Diagnosis<br/>Target vs Baseline v0"]):::flowStart --> PreCheck{"Severe Color Cast?"}:::origVisual
+    PreCheck -->|"Optional One-Shot"| PreWB["pre_tone_wb<br/>(wb.temp/tint → Color Effect → Fresh G1)"]:::origGuard
     PreWB --> Tone
-    PreCheck -->|"直接进入"| Tone["Tone 分支 · Neutral-First<br/>(统一灰度 · whites_blacks 起手)"]:::flowMid
-    Tone -->|"选出最佳影调版"| G2(["G2 色彩重评<br/>wb_assessment 语境诊断"]):::origVisual
-    G2 -->|"需要重调影调"| Tone
-    G2 --> Color["Color 分支<br/>(彩色 · WB/wbPick/HSL/分级/局部复用)"]:::flowMid
-    Color -->|"选出最佳色彩版"| G3(["G3 综合验收<br/>核查跨阶段债务 & 残差"]):::origVisual
-    G3 -->|"影调/色彩退化"| Tone
-    G3 -->|"色彩需返修"| Color
-    G3 --> Joint["Joint 分支<br/>(残差 & spawn_joint_task 精修 + 导出)"]:::flowMid
-    Joint -->|"导出实际 JPEG"| G4(["G4 交付确认<br/>目标图 vs 导出 JPEG"]):::flowEnd
-    G4 -->|"返修（旧确认失效）"| Joint
-    G4 -->|"确认交付 / Partial"| Done(["完成 & Close Proof"]):::flowEnd
+    PreCheck -->|"Direct Entry"| Tone["Tone Branch · Neutral-First<br/>(Unified Grayscale · whites_blacks First)"]:::flowMid
+    Tone -->|"Select Best Tone"| G2(["G2 Color Reassessment<br/>wb_assessment"]):::origVisual
+    G2 -->|"Backtrack"| Tone
+    G2 --> Color["Color Branch<br/>(Color · WB/wbPick/HSL/Grading/Mask Reuse)"]:::flowMid
+    Color -->|"Select Best Color"| G3(["G3 Integration Check<br/>Cross-Phase Debt & Residuals"]):::origVisual
+    G3 -->|"Tone Regression"| Tone
+    G3 -->|"Color Rework"| Color
+    G3 --> Joint["Joint Branch<br/>(Residuals & spawn_joint_task + Export)"]:::flowMid
+    Joint -->|"Export JPEG"| G4(["G4 Delivery Verification<br/>Target vs Exported JPEG"]):::flowEnd
+    G4 -->|"Rework"| Joint
+    G4 -->|"Confirmed / Partial"| Done(["Complete & Close Proof"]):::flowEnd
 ```
 
 - **Neutral-First 影调路线**：Tone 阶段推荐 `whites_blacks → exposure → highlights_shadows → contrast → master_curve → parametric_curve → local_tone → closure`，先立黑白锚点与中灰骨架，再做局部光影。
@@ -63,23 +63,23 @@ flowchart TB
     classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
     classDef origMemory fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:2px
 
-    subgraph Input["数据输入与全分辨率渲染（蓝色主干流）"]
-        RAW["RAW / 中间源<br/>IFD → ActiveArea → DefaultCrop → Orientation"]:::flowStart --> Render["后端全分辨率渲染<br/>(LinearRaw / DNG Opacity 白底合成)"]:::flowMid
-        Target["作者成片目标<br/>(Display P3 → 真实 ICC 转 sRGB)"]:::flowStart
+    subgraph Input["Input Ingestion & Full-Res Rendering"]
+        RAW["RAW / Intermediate Source<br/>IFD → ActiveArea → DefaultCrop → Orientation"]:::flowStart --> Render["Full-Resolution Render<br/>(LinearRaw / DNG Opacity White Composite)"]:::flowMid
+        Target["Author Target<br/>(Display P3 → ICC Convert to sRGB)"]:::flowStart
     end
 
-    subgraph Derive["观察派生与归因隔离（琥珀金：原创视觉机制）"]
-        Render -->|"Tone 阶段"| Gray["Rec.709 统一灰度转换<br/>(剥离色彩干扰)"]:::origVisual
-        Render -->|"G1–G4 / Color / Joint"| RGB["彩色 sRGB 派生"]:::flowMid
-        Target -->|"Tone 阶段"| GrayT["目标灰度派生"]:::origVisual
-        Target -->|"其余阶段"| RGBT["目标彩色派生"]:::flowMid
-        Gray & GrayT & RGB & RGBT --> PNG["upright · RGB8 · sRGB PNG (剥离 EXIF)<br/>总览最长边 ≤ 512 / 局部 ROI ≤ 384"]:::flowEnd
+    subgraph Derive["Observation Derivation & Attribution Isolation"]
+        Render -->|"Tone Phase"| Gray["Rec.709 Unified Grayscale<br/>(Chroma Isolation)"]:::origVisual
+        Render -->|"G1–G4 / Color / Joint"| RGB["Color sRGB Derivation"]:::flowMid
+        Target -->|"Tone Phase"| GrayT["Target Grayscale"]:::origVisual
+        Target -->|"Other Phases"| RGBT["Target Color sRGB"]:::flowMid
+        Gray & GrayT & RGB & RGBT --> PNG["upright · RGB8 · sRGB PNG (EXIF Stripped)<br/>Overview ≤ 512px / Local ROI ≤ 384px"]:::flowEnd
     end
 
-    subgraph Compare["双图对比与锚点绑定（翠绿：原创锚点与记忆绑定）"]
-        PNG --> Anchors["review_anchors 真实绑定<br/>(target/protected · explicit_cells/full_frame · 4×4 网格)"]:::origMemory
-        Anchors --> TargetCmp["Target 对比: 目标图 vs 当前版<br/>(tone_assessment 区分 structure / chroma 归因)"]:::origVisual
-        Anchors --> EffectCmp["Effect 对比: 父版本 vs 子版本<br/>(tone_boundary_review 检查核心/羽化/区外保护)"]:::origVisual
+    subgraph Compare["Dual-Image Comparison & Anchor Binding"]
+        PNG --> Anchors["review_anchors Binding<br/>(target/protected · explicit_cells/full_frame · 4×4 Grid)"]:::origMemory
+        Anchors --> TargetCmp["Target Comparison: Target vs Current<br/>(tone_assessment: structure vs chroma)"]:::origVisual
+        Anchors --> EffectCmp["Effect Comparison: Parent vs Child<br/>(tone_boundary_review: core / feather / exterior)"]:::origVisual
     end
 ```
 
@@ -94,25 +94,24 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    classDef flowStart fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
     classDef flowMid fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
     classDef flowEnd fill:#bfdbfe,stroke:#1d4ed8,color:#172554,stroke-width:2.5px
     classDef origMemory fill:#d1fae5,stroke:#059669,color:#064e3b,stroke-width:2px
     classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
     classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
 
-    subgraph Memory["权威会话三层记忆（翠绿：原创记忆拓扑）"]
-        TK["1. 工具知识<br/>阶段权限 / 单位 / 原生范围"]:::origMemory
-        PB["2. 建议库 (Proposal Bank)<br/>Issue & 稳定 task_groups · Typed 依赖 (soft/hard)<br/>Waiver 沿祖先链继承 · 遗漏不自动 retire"]:::origMemory
-        EL["3. 执行账本 (Execution Ledger)<br/>selected_baseline (root→selected 真实链)<br/>active_masks_summary (center<0.1 提醒)"]:::origMemory
+    subgraph Memory["Tri-Layer Authoritative Session Memory"]
+        TK["1. Tool Knowledge<br/>Stage Whitelist / Units / Native Bounds"]:::origMemory
+        PB["2. Proposal Bank<br/>Issues & Stable task_groups · Typed Deps (soft/hard)<br/>Ancestor Waiver Inheritance"]:::origMemory
+        EL["3. Execution Ledger<br/>selected_baseline (root→selected Chain)<br/>active_masks_summary (center < 0.1 Hint)"]:::origMemory
     end
 
-    subgraph Flow["工作包投影与跨阶段债务流转（蓝色流 + 珊瑚红派生）"]
-        TK & PB & EL --> WP["context.work_packet 唯一正文<br/>• 焦点 Group & 上一步五字段预期<br/>• 历史参数与弃支折为可检索索引"]:::flowMid
-        EL -->|"真实操作触发"| Debt["photo-review-debt/v2<br/>(绑定稳定 focus_id & review_region)"]:::origVisual
+    subgraph Flow["Working-Packet Projection & Review Debt Routing"]
+        TK & PB & EL --> WP["context.work_packet<br/>• Focus Group & 5-Field Expectation<br/>• Cursor-Indexed History & Off-Branch Archive"]:::flowMid
+        EL -->|"Executed Mutation"| Debt["photo-review-debt/v2<br/>(Stable focus_id & review_region)"]:::origVisual
         Debt -->|"no_regression / minor_acceptable"| Settled(["resolved / accepted_tradeoff"]):::flowEnd
-        Debt -->|"spawn_joint_task"| JointSpawn["原子创建 joint-from:<debt_id><br/>(仅存证据与保护关系，待模型补方案)"]:::origGuard
-        EL -->|"跨分支选版"| Reset["记录 BRANCH RESET NOTICE<br/>废弃分支 pending 标为不适用"]:::origGuard
+        Debt -->|"spawn_joint_task"| JointSpawn["Atomic Spawn: joint-from:<debt_id><br/>(Evidence & Protected Scope Only)"]:::origGuard
+        EL -->|"Branch Revert"| Reset["BRANCH RESET NOTICE<br/>Off-Branch Pending Marked Inapplicable"]:::origGuard
     end
 ```
 
@@ -128,36 +127,36 @@ Harness 将调色任务拆解为 **Issue → Branch → Module → Fine Group**�
 ```mermaid
 sequenceDiagram
     autonumber
-    box rgba(237, 233, 254, 0.5) 决策与适配层
+    box rgba(237, 233, 254, 0.5) Decision & Adaptation Layer
         participant Agent as DSH Agent
         participant Adapter as JS Adapter / Schema
     end
-    box rgba(209, 250, 229, 0.5) 原创 Harness 状态机与护栏
-        participant Worker as Python 状态机 (v20)
+    box rgba(209, 250, 229, 0.5) Harness State Machine
+        participant Worker as Python Worker (v20)
     end
-    box rgba(239, 246, 255, 0.7) 原生执行后端
-        participant Native as 原生图像后端
+    box rgba(239, 246, 255, 0.7) Execution Backend
+        participant Native as Native Imaging Backend
     end
 
-    Worker->>Adapter: 投影当前阶段合同 + context.work_packet + 双图 PNG
-    Adapter->>Agent: 发起单回合推理请求
-    Agent-->>Adapter: 提交 photo_stage_turn<br/>(review / anchors / bank_delta / selected_group / action)
+    Worker->>Adapter: Project Stage Contract + context.work_packet + Dual PNGs
+    Adapter->>Agent: Dispatch Single-Turn Reasoning Request
+    Agent-->>Adapter: Submit photo_stage_turn<br/>(review / anchors / bank_delta / selected_group / action)
 
     rect rgba(254, 243, 199, 0.45)
-        Note over Adapter,Worker: v20 幂等规范化与容错分流
-        Adapter->>Worker: 保留 raw/canonical/warnings (如 anchor 回落 unknown / 唯一别名归一)
-        Worker->>Worker: 校验阶段权限、Typed 依赖、不适用 debt batch 隔离
+        Note over Adapter,Worker: Idempotent Normalization & Fault Isolation
+        Adapter->>Worker: Preserve raw/canonical/warnings (unknown anchor fallback / alias norm)
+        Worker->>Worker: Validate Stage Scope, Typed Deps & Debt Batch Isolation
     end
 
-    alt 校验不通过（no-effect，未进入原生写入）
-        Worker-->>Agent: 保留合法 bank 更新，仅返回结构/动作修正反馈
-    else 通过 Execution Fence 校验
+    alt Validation Rejected (no-effect before native write)
+        Worker-->>Agent: Retain Valid Bank Updates & Return Action Correction Feedback
+    else Passed Execution Fence
         rect rgba(255, 228, 230, 0.45)
-            Note over Worker,Native: 原子事务与同 ID 局部复用
-            Worker->>Native: 全局更新 / develop.wbPick / 蒙版事务<br/>(新建绑定真实 ID → all-20 中性初始化；复用仅 patch 本阶段字段)
-            Native-->>Worker: 读回实际 DevelopSettings + 全分辨率渲染
+            Note over Worker,Native: Atomic Native Transaction & Same-ID Mask Reuse
+            Worker->>Native: Global Patch / develop.wbPick / Mask Transaction<br/>(Create: Bind Real ID → all-20 Init; Reuse: Stage-Scoped Patch)
+            Native-->>Worker: Readback DevelopSettings + Full-Res Render
         end
-        Worker->>Worker: 更新版本树、close_proof 闭合证明与下一轮观察图
+        Worker->>Worker: Update Version Tree, close_proof & Next Observation Pair
     end
 ```
 

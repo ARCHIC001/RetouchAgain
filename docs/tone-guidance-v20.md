@@ -34,10 +34,10 @@ flowchart LR
     classDef origVisual fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:2px
     classDef origGuard fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-width:2px
 
-    G1["G1 彩色初诊<br/>严重偏色影响影调判断"]:::flowStart -->|"可选窄动作 pre_tone_wb<br/>仅调整 wb.temp / wb.tint"| Apply["绑定显式 base_version 写入<br/>(消耗一次 pre_tone_wb 资格)"]:::origGuard
-    Apply --> Eff["彩色 Effect 复核<br/>确认白平衡粗调结果"]:::origVisual
-    Eff --> FreshG1["Fresh G1 彩色 Target<br/>重新建立影调判断"]:::origVisual
-    FreshG1 --> Tone(["正式进入 Tone 阶段"]):::flowEnd
+    G1["G1 Color Diagnosis<br/>Severe Cast Affects Tone"]:::flowStart -->|"Narrow Action: pre_tone_wb<br/>(wb.temp / wb.tint only)"| Apply["Apply on Explicit base_version<br/>(Consume One-Shot Budget)"]:::origGuard
+    Apply --> Eff["Color Effect Review<br/>Verify Coarse WB Outcome"]:::origVisual
+    Eff --> FreshG1["Fresh G1 Color Target<br/>Rebuild Tone Assessment"]:::origVisual
+    FreshG1 --> Tone(["Enter Tone Phase"]):::flowEnd
 ```
 
 - **动作约束**：必须显式指定 `base_version`，仅开放 `wb.temp / wb.tint` 标量（至少一项），并附带 `tone_basis_impact` 与预期说明。
