@@ -58,3 +58,14 @@
 - `src/dsh_stage_adapter.mjs`、`src/photo_request_primitives.mjs`：请求发送、回执解析与诊断。
 - `src/dsh_stage_validation.py`、`src/photo_stage_continuation.py`：任务 `prepare / freeze` 与检查点续接。
 - `src/photo_authorization_window.py`、`src/dsh_stage_authorize.py`：运行授权窗口管理。
+
+
+---
+
+## v20追加：公开结构兼容与unknown保护
+
+> 发布派生版/非历史原稿。旧协议说明保留，当前构建号以本节及发布清单为准。
+
+当前构建v20／资源v20，外层协议v2／动态阶段合同v3保持；生成分配65,536。50总观察和分支份额只是规划，不能据此截断合法工作或强迫用完；费用应跨修复scope累计。
+
+指定叙述列表可逆规范化、附带metadata与warning保留；不猜Native参数、不补空调用。执行前拒绝只有强no-effect证明才可记未执行；未知结果保pending／fence／circuit，先对账不盲重放。强close-proof与新scope继承保全部来源链，详见 [v20使用与安全边界](v20-update-and-usage.md)。

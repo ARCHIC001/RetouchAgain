@@ -8,7 +8,7 @@ import {STAGE_TOOL,STAGE_TOOL_DESCRIPTION,stageContractRevision,stageRecoverable
 import {assertNotHeld,tripCircuit,requestMass} from './lab_timing_dispatch_guard.mjs';
 import {BudgetPause} from './photo_runtime_errors.mjs';
 
-export const BUILD='dsh-stage-runtime-v13-20261113';
+export const BUILD='dsh-stage-runtime-v20-20261114';
 export const PROTOCOL='dsh-stage-runtime/v2';
 export const PREFLIGHT='experiments/validation/latest/dsh-stage-preflight.json';
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));
@@ -16,7 +16,7 @@ const object=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
 const equal=(a,b)=>JSON.stringify(canonical(a))===JSON.stringify(canonical(b));
 function canonical(x){return Array.isArray(x)?x.map(canonical):object(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,canonical(x[k])])):x;}
 function atomic(file,value,exclusive=false){fs.mkdirSync(path.dirname(file),{recursive:true});const data=JSON.stringify(value,null,2);if(exclusive)return fs.writeFileSync(file,data,{encoding:'utf8',flag:'wx'});const t=file+'.tmp-'+randomUUID();fs.writeFileSync(t,data,'utf8');fs.renameSync(t,file);}
-export function stageResources(){const value=read(path.join(import.meta.dirname,'photo_stage_resources.json'));if(value.schema!=='photo-stage-resources/v1'||value.id!=='stage-resource/v13'||value.build!==BUILD)throw Error('Trusted stage resources unavailable');return value;}
+export function stageResources(){const value=read(path.join(import.meta.dirname,'photo_stage_resources.json'));if(value.schema!=='photo-stage-resources/v1'||value.id!=='stage-resource/v20'||value.build!==BUILD)throw Error('Trusted stage resources unavailable');return value;}
 export function validateStageRound(root,round){
   root=fs.realpathSync(root);round=fs.realpathSync(round);
   const python=read(path.join(root,'experiments/config/runtime.local.json')).python||(process.env.VISHARNESS_PYTHON||'python');
@@ -29,7 +29,7 @@ function validateProviderUsage(receipt,resources){
   moduleCost(receipt.usage,receipt.service_tier);const u=receipt.usage,input=u.input_tokens+u.cache_creation_input_tokens+u.cache_read_input_tokens;
   if(input>resources.model.context_tokens||u.output_tokens>resources.model.maximum_output_tokens||input+u.output_tokens>resources.model.context_tokens)throw Error('Provider-impossible actual token usage; preserve receipt for reconciliation');
 }
-function checkProtocol(protocol){if(protocol.schema!==PROTOCOL||protocol.build!==BUILD||protocol.resource_profile_id!=='stage-resource/v13'||!equal(protocol.resources_snapshot,stageResources())||protocol.prior_task_rounds?.length)throw Error('Independent stage resource protocol required');}
+function checkProtocol(protocol){if(protocol.schema!==PROTOCOL||protocol.build!==BUILD||protocol.resource_profile_id!=='stage-resource/v20'||!equal(protocol.resources_snapshot,stageResources())||protocol.prior_task_rounds?.length)throw Error('Independent stage resource protocol required');}
 export function stageResponseCalls(receipt){
   const calls=receipt.public_content?.filter(b=>b.type==='tool_use');
   if(!Array.isArray(calls)||calls.length)return calls;
@@ -167,7 +167,7 @@ export function validateStageCalls(calls,tools,options){
   const c=calls[0];assertFinitePublic(c.input);const revision=stageContractRevision(stageContext(options));checkValue(c.input,tools[0].input_schema,c.name);
   if(c.input.contract_revision!==revision)invalidValue(c.name+'.contract_revision','Stage call contract_revision differs from supplied context');
   const action=c.input.action;
-  if(!object(c.input.review)||!object(action)||!['photo_edit','photo_observe','photo_history','photo_discover','photo_finish','photo_unable','advance'].includes(action.name)||!object(action.arguments))invalidValue(c.name,'Stage turn requires public review and one explicit nested action');
+  if(!object(c.input.review)||!object(action)||!['photo_edit','pre_tone_wb','photo_observe','photo_history','photo_discover','photo_finish','photo_unable','advance'].includes(action.name)||!object(action.arguments))invalidValue(c.name,'Stage turn requires public review and one explicit nested action');
 }
 function send(root,body,scope,id,signal,limit){return new Promise((resolve,reject)=>{
   const child=spawn(process.execPath,[path.join(root,'src/lab_timing_api.mjs'),'--scope',scope,'--build',BUILD,'--request-id',id],{cwd:root,stdio:['pipe','pipe','pipe'],windowsHide:true});let size=0,chunks=[],done=false;
@@ -192,6 +192,7 @@ export function stageAdapter(dsh,{root,round,folder,scope,registry,context={}}){
       r.actions.push({name,call_id:callId,status,observation_id:observationId,disposition:'executed',progress});
       if(status!=='working'){this.batchTerminal={status,observation_id:observationId,terminal_call_id:callId};const tail=calls.slice(r.actions.length);this.skippedCalls=new Map(tail.map(c=>[c.id,c]));for(const later of tail)r.actions.push({name:later.name,call_id:later.id,status:'not_executed',observation_id:null,disposition:'skipped_after_terminal',terminal_call_id:callId,terminal_status:status,terminal_observation_id:observationId});}
       const complete=validateStageActions(r);atomic(file,r);if(complete)fs.unlinkSync(pending);
+      atomic(path.join(round,'stage-usage-live.json'),stageBudgetStatus(protocol,scope,reconcileStageTask(root,round,protocol)));
     }
     markRecoverableRejected(name,args,callId,snapshot,requestId=this.lastRequest){
       if(requestId!==this.lastRequest)throw Error('Stage rejection request identity mismatch');
@@ -205,6 +206,7 @@ export function stageAdapter(dsh,{root,round,folder,scope,registry,context={}}){
         no_effect:structuredClone(result.no_effect),stage_turn_result:structuredClone(result)});
       const complete=validateStageActions(r);if(!complete)throw Error('Stage rejection did not settle every actual call');
       atomic(file,r);fs.unlinkSync(pending);
+      atomic(path.join(round,'stage-usage-live.json'),stageBudgetStatus(protocol,scope,reconcileStageTask(root,round,protocol)));
     }
     settleSchemaRejected(name,args,callId,requestId=this.lastRequest){
       if(this.problem||this.batchTerminal||requestId!==this.lastRequest)throw Error('Stage response rejection request identity mismatch');
@@ -221,7 +223,7 @@ export function stageAdapter(dsh,{root,round,folder,scope,registry,context={}}){
       if(!validateStageActions(r))throw Error('Stage response rejection did not settle actual call');
       atomic(file,r);fs.unlinkSync(pending);return result;
     }
-    markRejected(name,note){const file=path.join(round,'receipts',this.lastRequest+'.json'),r=read(file),c=stageResponseCalls(r)[r.actions.length];if(c?.name!==name)throw Error('Stage rejected-action identity mismatch');r.rejected_action={name,call_id:c.id,status:'rejected_before_execution',note};atomic(file,r);this.problem=Error('Stage tool failed; reconcile without replay');tripCircuit(root,this.problem.message,this.lastRequest);}
+    markRejected(name,note){const file=path.join(round,'receipts',this.lastRequest+'.json'),r=read(file),c=stageResponseCalls(r)[r.actions.length];if(c?.name!==name)throw Error('Stage rejected-action identity mismatch');r.rejected_action={name,call_id:c.id,status:'unknown_tool_failure',execution_status:'unknown',note};atomic(file,r);this.problem=Error('Stage tool failed; reconcile without replay');tripCircuit(root,this.problem.message,this.lastRequest);}
     async *stream(options){let fd,id,sent=false,requestOptions=options;const usage={inputTokens:0,outputTokens:0,cacheReadTokens:0,cacheWriteTokens:0};try{
       if(this.problem)throw this.problem;fd=fs.openSync(lease,'wx');
       while(true){

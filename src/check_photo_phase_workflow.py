@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image, ImageCms
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import photo_phase_scheduler as phase
 import photo_proposal_bank as bank
 import photo_stage_observation as observation
+import photo_review_anchors as anchors
 from photo_image_contract import inspect_image
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -366,6 +368,234 @@ class WorkflowChecks(unittest.TestCase):
         self.assertEqual(subject['workflow']['phase'], 'tone')
         self.assertIsNone(subject['workflow']['accepted_versions']['tone'])
         self.assertEqual(len(subject['workflow']['events']), 3)
+
+
+class FocusDebtChecks(unittest.TestCase):
+    def setup_debt(self, *, explicit=False, full=False, roi=None):
+        subject = state()
+        forward(subject)
+        spec = {'candidate_roi': roi} if roi is not None else {}
+        ident = seen(subject, view_spec=spec,
+                     stage_observation=observation.stage_observation_metadata('tone', 'fixture', explicit))
+        review = {'visible_comparison': 'Actual fixture grayscale comparison', 'reason': 'Keep original rationale'}
+        if explicit or full:
+            anchor = {'id': 'sky', 'purpose': 'target', 'extent': 'explicit_cells' if explicit else 'full_frame',
+                      'view_role': 'current', 'region': 'Sky above facade', 'qualification': 'Not author registration'}
+            if explicit:
+                anchor['cells'] = ['A1']
+            review['review_anchors'] = [anchor]
+        expectation = {'target': 'Sky', 'expected_change': 'More separation', 'protected_region': 'Warm facade',
+                       'risk': 'Spill', 'falsifier': 'Facade becomes dull'}
+        focus = anchors.build_debt_focus(review, subject['observations'][-1], 'op1', expectation)
+        phase.add_review_debt(subject, {'schema': 'photo-review-debt/v2', 'id': 'd1', 'version': 'v0',
+            'due_phase': 'G2', 'reason': 'Recheck color and protection', 'operation_id': 'op1', 'focus': focus})
+        ident = seen(subject)
+        phase.advance_workflow(subject, 'Open actual color checkpoint', ident)
+        return subject, self.color_seen(subject, grid=explicit)
+
+    def color_seen(self, subject, grid=False, **fields):
+        return seen(subject, stage_observation=observation.stage_observation_metadata(
+            subject['workflow']['phase'], 'fixture', grid), **fields)
+
+    def update(self, subject, resolution='no_regression'):
+        debt = subject['workflow']['review_debts'][0]
+        return {'id': debt['id'], 'resolution': resolution, 'reason': 'Explicit full review conclusion',
+                'checks': [{'focus_id': focus['id'], 'outcome': resolution,
+                            'evidence': 'Visible preserved relation in ' + focus['purpose'] + ' region',
+                            'review_region': focus['region'],
+                            **({'review_cells': ['D4']} if focus['extent'] == 'explicit_cells' else {})}
+                           for focus in debt['focus']],
+                **({'joint_diagnosis': 'New boundary color residue needs diagnosis'} if resolution == 'spawn_joint_task' else {})}
+
+    def test_unknown_focus_pending_is_not_gate_and_complete_checks_bind_actual_phase(self):
+        subject, ident = self.setup_debt()
+        before = copy.deepcopy(subject)
+        plan = phase.validate_transition(subject, 'No debt checklist gate', ident, bank_delta=[], color_reassessment=[])
+        self.assertEqual(subject, before)
+        self.assertEqual(plan['workflow']['events'][-1]['outstanding_review_debts'], ['d1'])
+        self.assertEqual(subject['workflow']['review_debts'][0]['status'], 'pending')
+        result = phase.resolve_review_debts(subject, [self.update(subject)], ident)[0]
+        self.assertEqual(result['status'], 'resolved')
+        self.assertEqual(result['actual_phase'], 'G2')
+        self.assertEqual(result['reviewed_version'], subject['current'])
+        self.assertFalse(result['photographic_fix_claimed'])
+        self.assertTrue(all(c['source']['observation_id'] == ident for c in result['checks']))
+
+    def test_v2_status_bypass_missing_focus_or_evidence_rejected_without_mutation(self):
+        subject, ident = self.setup_debt()
+        for case in ('legacy', 'missing', 'blank', 'duplicate', 'mismatch'):
+            update = self.update(subject)
+            if case == 'legacy':
+                update = {'id': 'd1', 'status': 'resolved', 'reason': 'Batch reason cannot bypass v2'}
+            elif case == 'missing':
+                update['checks'].pop()
+            elif case == 'blank':
+                update['checks'][0]['evidence'] = ''
+            elif case == 'duplicate':
+                update['checks'].append(copy.deepcopy(update['checks'][0]))
+            else:
+                update['checks'][0]['outcome'] = 'minor_acceptable'
+            before = copy.deepcopy(subject)
+            with self.assertRaises(ValueError, msg=case):
+                phase.resolve_review_debts(subject, [update], ident)
+            self.assertEqual(subject, before)
+
+    def test_explicit_cells_relocalized_on_independent_actual_target_grid(self):
+        subject, _ = self.setup_debt(explicit=True, roi=[.1, .1, .6, .7])
+        ident = self.color_seen(subject, grid=True,
+            view_spec={'reference_roi': [0, 0, .4, .5], 'candidate_roi': [.4, .4, 1, 1]})
+        update = self.update(subject)
+        reviewed = phase.resolve_review_debts(subject, [update], ident)[0]
+        self.assertEqual(reviewed['focus'][0]['cells'], ['A1'])
+        self.assertEqual(reviewed['checks'][0]['review_cells'], ['D4'])
+        self.assertEqual(reviewed['focus'][0]['source']['roi'], [.1, .1, .6, .7])
+        self.assertEqual(reviewed['checks'][0]['source']['roi'], [.4, .4, 1, 1])
+        self.assertEqual(reviewed['checks'][0]['mapping'], 'qualitative_relocalization_not_registration')
+
+    def test_explicit_cells_missing_actual_grid_or_cells_stays_pending(self):
+        for grid, cells in ((False, True), (True, False)):
+            subject, _ = self.setup_debt(explicit=True)
+            ident = self.color_seen(subject, grid=grid)
+            update = self.update(subject)
+            if not cells:
+                update['checks'][0].pop('review_cells')
+            before = copy.deepcopy(subject)
+            with self.assertRaises(ValueError):
+                phase.resolve_review_debts(subject, [update], ident)
+            self.assertEqual(subject, before)
+
+    def test_full_frame_review_cannot_be_borrowed_from_cropped_view(self):
+        subject, _ = self.setup_debt(full=True)
+        ident = self.color_seen(subject, view_spec={'candidate_roi': [.1, .1, .8, .8]})
+        before = copy.deepcopy(subject)
+        with self.assertRaises(ValueError):
+            phase.resolve_review_debts(subject, [self.update(subject)], ident)
+        self.assertEqual(subject, before)
+
+    def test_due_phase_actual_checkpoint_and_current_target_cannot_be_faked(self):
+        for change in ('effect', 'gray', 'joint', 'stale', 'early'):
+            subject, _ = self.setup_debt()
+            if change == 'joint':
+                subject['workflow']['phase'] = 'joint'
+            if change == 'early':
+                subject['workflow']['review_debts'][0]['due_phase'] = 'G3'
+            if change == 'stale':
+                subject['versions']['v1'] = {'parent': 'v0'}
+                subject['current'] = 'v1'
+            fields = {'comparison_mode': 'effect'} if change == 'effect' else {}
+            ident = self.color_seen(subject, version='v0', **fields)
+            if change == 'gray':
+                subject['observations'][-1]['stage_observation']['view_mode'] = 'grayscale'
+            before = copy.deepcopy(subject)
+            with self.assertRaises(ValueError, msg=change):
+                phase.resolve_review_debts(subject, [self.update(subject)], ident)
+            self.assertEqual(subject, before)
+
+    def test_overdue_review_records_actual_g4_not_forged_g2_or_g3(self):
+        subject, ident = self.setup_debt()
+        phase.advance_workflow(subject, 'Leave explicitly pending', ident, bank_delta=[], color_reassessment=[])
+        forward(subject)
+        forward(subject)
+        ident = seen(subject)
+        subject['export'] = {'version': 'v0', 'path': 'fixture-export.jpg'}
+        phase.advance_workflow(subject, 'Actual JPEG available', ident)
+        ident = self.color_seen(subject, artifact='export', path='fixture-export.jpg')
+        result = phase.resolve_review_debts(subject, [self.update(subject, 'minor_acceptable')], ident)[0]
+        self.assertEqual(result['actual_phase'], 'G4')
+        self.assertEqual(result['due_phase'], 'G2')
+        self.assertEqual(result['status'], 'accepted_tradeoff')
+
+    def test_new_focus_requires_bound_observation_and_explicit_v2_schema(self):
+        subject, _ = self.setup_debt()
+        prototype = copy.deepcopy(subject['workflow']['review_debts'][0])
+        prototype.update(id='d2', due_phase='G3')
+        for bad in ('unbound', 'legacy', 'unknown_schema', 'operation'):
+            debt = copy.deepcopy(prototype)
+            if bad == 'unbound':
+                debt['focus'][0]['source']['observation_id'] = 'missing'
+            elif bad == 'legacy':
+                debt.pop('schema')
+            elif bad == 'operation':
+                debt['operation_id'] = 'other'
+            else:
+                debt['schema'] = 'future-unknown'
+            before = copy.deepcopy(subject)
+            with self.assertRaises(ValueError, msg=bad):
+                phase.add_review_debt(subject, debt)
+            self.assertEqual(subject, before)
+
+    def test_spawn_is_diagnostic_only_stable_and_exact_retry_is_noop(self):
+        subject, ident = self.setup_debt()
+        update = self.update(subject, 'spawn_joint_task')
+        result = phase.resolve_review_debts(subject, [update], ident)[0]
+        self.assertEqual(result['status'], 'reviewed_joint_task')
+        self.assertTrue(result['review_complete'])
+        self.assertFalse(result['photographic_fix_claimed'])
+        issue = subject['proposal_bank']['issues'][result['joint_issue_id']]
+        self.assertEqual(issue['id'], 'joint-from:d1')
+        self.assertEqual(issue['branch'], 'joint')
+        self.assertEqual(issue['task_groups'], {})
+        self.assertNotIn('proposed_controls', issue)
+        self.assertEqual(issue['source_debt_ids'], ['d1'])
+        self.assertEqual(issue['source_refs'][0]['anchors'], result['focus'])
+        before = copy.deepcopy(subject)
+        phase.resolve_review_debts(subject, [update], ident)
+        self.assertEqual(subject, before)
+
+    def test_spawn_link_does_not_modify_existing_groups(self):
+        subject, ident = self.setup_debt()
+        bank.apply_bank_delta(subject, [{'op': 'add', 'id': 'existing', 'branch': 'joint',
+            'diagnosis': 'Preexisting work', 'groups': [{'group_id': 'small', 'module': 'light',
+            'proposed_controls': {'values': {'light.exposure': .1}}}]}], ident)
+        groups = copy.deepcopy(subject['proposal_bank']['issues']['existing']['task_groups'])
+        update = {**self.update(subject, 'spawn_joint_task'), 'existing_joint_issue_id': 'existing'}
+        result = phase.resolve_review_debts(subject, [update], ident)[0]
+        self.assertEqual(result['joint_issue_id'], 'existing')
+        self.assertEqual(subject['proposal_bank']['issues']['existing']['task_groups'], groups)
+
+    def test_bank_and_debt_commit_roll_back_together_on_later_failure(self):
+        subject, ident = self.setup_debt()
+        update = self.update(subject, 'spawn_joint_task')
+        before = copy.deepcopy(subject)
+        with self.assertRaises(ValueError):
+            phase.resolve_review_debts(subject, [update, {'id': 'missing', 'reason': 'Invalid later debt'}], ident)
+        self.assertEqual(subject, before)
+        def fail_after_change(draft, *args, **kwargs):
+            draft['proposal_bank']['revision'] += 1
+            raise ValueError('Synthetic bank failure after draft change')
+        with patch.object(bank, 'spawn_joint_diagnostic', fail_after_change):
+            with self.assertRaises(ValueError):
+                phase.resolve_review_debts(subject, [update], ident)
+        self.assertEqual(subject, before)
+
+    def test_parent_rollback_restore_is_reversible_idempotent_not_false_resolution(self):
+        subject = state()
+        forward(subject)
+        subject['versions'].update({'v1': {'parent': 'v0'}, 'v2': {'parent': 'v1'}, 'other': {'parent': 'v0'}})
+        for ident, version in (('d1', 'v1'), ('d2', 'v2'), ('off', 'other')):
+            phase.add_review_debt(subject, {'id': ident, 'version': version, 'due_phase': 'G2', 'reason': 'Legacy consequence'})
+        subject['workflow']['review_debts'].extend([
+            {'id': 'resolved', 'version': 'v2', 'due_phase': 'G2', 'status': 'resolved'},
+            {'id': 'accepted', 'version': 'v2', 'due_phase': 'G2', 'status': 'accepted_tradeoff'}])
+        phase.reconcile_debt_applicability(subject, 'v1', 'parent-selection')
+        self.assertEqual(subject['workflow']['review_debts'][1]['status'], 'not_applicable_selected_branch')
+        phase.reconcile_debt_applicability(subject, 'v2', 'child-selection')
+        statuses = {d['id']: d['status'] for d in subject['workflow']['review_debts']}
+        self.assertEqual(statuses, {'d1': 'pending', 'd2': 'pending', 'off': 'not_applicable_selected_branch',
+                                    'resolved': 'resolved', 'accepted': 'accepted_tradeoff'})
+        before = copy.deepcopy(subject)
+        phase.reconcile_debt_applicability(subject, 'v2', 'child-selection')
+        self.assertEqual(subject, before)
+        subject['current'] = 'v1'
+        ident = seen(subject)
+        phase.advance_workflow(subject, 'Parent branch accepted', ident)
+        self.assertEqual(subject['workflow']['review_debts'][1]['status'], 'not_applicable_selected_branch')
+        subject['workflow']['phase'] = 'tone'
+        subject['current'] = 'v2'
+        ident = seen(subject)
+        phase.advance_workflow(subject, 'Reselected actual descendant', ident)
+        self.assertEqual(subject['workflow']['review_debts'][1]['status'], 'pending')
+        self.assertNotIn('reviewed_version', subject['workflow']['review_debts'][1])
 
 
 class ObservationChecks(unittest.TestCase):

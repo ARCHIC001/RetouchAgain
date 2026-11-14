@@ -17,9 +17,9 @@ import lab_timing_experiment as lab
 from photo_capability_catalog import _check
 from photo_stage_rejections import ActionRejected, require_action
 
-BUILD = 'dsh-stage-runtime-v13-20261113'
+BUILD = 'dsh-stage-runtime-v20-20261114'
 SCHEMA = 'dsh-stage-runtime/v2'
-RESOURCE_PROFILE = 'stage-resource/v13'
+RESOURCE_PROFILE = 'stage-resource/v20'
 RESOURCE_FILE = Path(__file__).with_name('photo_stage_resources.json')
 
 
@@ -49,6 +49,9 @@ def action_schemas(phase='joint'):
         char_limit={'type': 'integer', 'minimum': 1})
     from photo_stage_schema import stage_edit_schema
     result['photo_edit']['properties'].update(stage_edit_schema(phase))
+    if phase == 'pre_tone_wb':
+        for field in ('settings', 'commands', 'mask_plan', 'phase'):
+            result['photo_edit']['properties'].pop(field, None)
     result['photo_edit']['properties']['review']['properties']['judgment_items'] = {
         'type': 'array', 'items': module.obj({'id': {'type': 'string', 'minLength': 1},
         'region': {'type': 'string', 'minLength': 1},
@@ -57,10 +60,28 @@ def action_schemas(phase='joint'):
         'uncertainty': {'type': 'string'}}, ('id', 'region', 'kind', 'judgment'))}
     text = {'type': 'string', 'minLength': 1}
     group_review = module.obj({'issue_id': text, 'group_id': text, 'reason': text,
-        'outcome': {'enum': ['resolved', 'needs_reassessment', 'waiting_dependency', 'keep', 'revise', 'retire', 'defer']},
+        'outcome': {'enum': ['resolved', 'needs_reassessment', 'waiting_dependency', 'keep', 'revise', 'retire', 'defer', 'skip']},
         'operation_id': text, 'proposed_controls': {'oneOf': [{'type': 'object'}, {'type': 'array'}]},
         'priority': {'type': 'number'}, 'dependencies': {}}, ('issue_id', 'group_id', 'reason', 'outcome'))
     result['photo_edit']['properties']['review']['properties']['group_reviews'] = {'type': 'array', 'items': group_review}
+    from photo_white_balance import assessment_schema, local_review_schema
+    result['photo_edit']['properties']['review']['properties'].update(
+        wb_assessment=assessment_schema(), wb_local_review=local_review_schema(),
+        wb_pick_review=module.obj({'neutrality_basis': text, 'source_region': text,
+            'coordinate_space': {'const': 'full_oriented_source'},
+            'full_image_point': module.obj({'x': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                                           'y': {'type': 'number', 'minimum': 0, 'maximum': 1}}, ('x', 'y')),
+            'roi_mapping_reason': text}, ('neutrality_basis', 'source_region', 'coordinate_space',
+                                        'full_image_point', 'roi_mapping_reason')))
+    from photo_tone_guidance import tone_assessment_schema
+    result['photo_edit']['properties']['review']['properties'].update(
+        tone_assessment=tone_assessment_schema(), tone_basis_impact=text,
+        tone_boundary_review=module.obj({'operation_id': text,
+            'outcome': {'enum': ['protected', 'affected', 'uncertain']},
+            'evidence': text, 'joint_handoff_reason': text, 'joint_group_id': text}, ('operation_id', 'outcome', 'evidence')))
+    from photo_review_anchors import anchor_schema
+    result['photo_edit']['properties']['review']['properties']['review_anchors'] = {
+        'type': 'array', 'items': anchor_schema()}
     for field in ('rationale', 'predicted_effect'):
         result['photo_edit']['properties'][field]['minLength'] = 1
     return result
@@ -77,7 +98,7 @@ def bank_delta_schema():
         'proposed_controls': fields['proposed_controls'], 'priority': {'type': 'number'},
         'dependencies': {}, 'reason': text,
         'status': {'enum': ['ready', 'needs_reassessment', 'waiting_dependency', 'later_phase', 'current',
-                           'awaiting_effect', 'resolved', 'retired', 'off_selected_branch', 'unresolved']},
+                           'awaiting_effect', 'resolved', 'retired', 'skipped', 'off_selected_branch', 'unresolved']},
         'reorder_override': {'oneOf': [module.obj({'order': {'type': 'number'}, 'reason': text}, ('order', 'reason')),
                                      module.obj({'before': text, 'reason': text}, ('before', 'reason'))]}}
     fields['groups'] = {'type': 'array', 'items': module.obj(group_fields, ('proposed_controls',))}
@@ -107,6 +128,13 @@ def schemas(phase='G1', contract_revision=None, *, validation_envelope=False):
     if phase in ('joint', 'G4'):
         permitted += ['photo_finish']
     branches = []
+    if phase == 'G1' or validation_envelope:
+        from photo_stage_schema import stage_edit_schema
+        text = {'type': 'string', 'minLength': 1}
+        branches.append(module.obj({'name': {'const': 'pre_tone_wb'},
+            'arguments': module.obj({'base_version': text, **stage_edit_schema('pre_tone_wb'),
+                'rationale': text, 'predicted_effect': text},
+                ('base_version', 'values', 'rationale', 'predicted_effect'))}, ('name', 'arguments')))
     for name in permitted:
         arguments = copy.deepcopy(actions[name])
         arguments['properties'].pop('review', None)
@@ -130,6 +158,7 @@ def schemas(phase='G1', contract_revision=None, *, validation_envelope=False):
         'kind': {'type': 'string', 'enum': ['tone', 'color', 'joint', 'protection', 'uncertain']},
         'judgment': {'type': 'string', 'minLength': 1}, 'evidence': {'type': 'string'},
         'uncertainty': {'type': 'string'}}, ('id', 'region', 'kind', 'judgment'))}
+    from photo_review_anchors import debt_update_schema
     result = module.obj({
         'contract_revision': {'type': 'string', 'const': revision},
         'review': review, 'bank_delta': bank_delta_schema(),
@@ -137,16 +166,14 @@ def schemas(phase='G1', contract_revision=None, *, validation_envelope=False):
         'selected_group_id': {'type': 'string', 'minLength': 1},
         'selection_reason': {'type': 'string', 'minLength': 1},
         'override_reason': {'type': 'string', 'minLength': 1},
-        'review_debt_updates': {'type': 'array', 'items': module.obj({'id': {'type': 'string'},
-            'status': {'type': 'string', 'enum': ['resolved', 'accepted_tradeoff']},
-            'reason': {'type': 'string', 'minLength': 1}}, ('id', 'status', 'reason'))},
+        'review_debt_updates': {'type': 'array', 'items': debt_update_schema()},
         'action': {'oneOf': branches}},
         ('contract_revision', 'review', 'action'))
-    if phase in ('tone', 'color', 'joint'):
+    if phase in ('G1', 'tone', 'color', 'joint') or validation_envelope:
         edit_review = copy.deepcopy(review)
         edit_review['required'] = ['visible_comparison', 'module_decisions', 'effect_expectation']
-        nonedit = {'oneOf': [branch for branch in branches if branch['properties']['name']['const'] != 'photo_edit']}
-        edit = next(branch for branch in branches if branch['properties']['name']['const'] == 'photo_edit')
+        nonedit = {'oneOf': [branch for branch in branches if branch['properties']['name']['const'] not in ('photo_edit', 'pre_tone_wb')]}
+        edit = {'oneOf': [branch for branch in branches if branch['properties']['name']['const'] in ('photo_edit', 'pre_tone_wb')]}
         result['oneOf'] = [module.obj({'action': edit, 'review': edit_review,
                                       'selected_issue_id': {'type': 'string', 'minLength': 1}},
                                      ('action', 'review', 'selected_issue_id')),
@@ -277,7 +304,9 @@ class StageSession(module.ModuleSession):
             if continuation is not None:
                 self.state = copy.deepcopy(continuation['continued_state'])
                 self.state['continuation_provenance'] = {k: continuation[k] for k in
-                    ('schema', 'source_round', 'selected_version', 'native_operations_replayed')}
+                    ('schema', 'source_round', 'selected_version', 'native_operations_replayed',
+                     'origin_round', 'continuation_chain', 'origin_source_round', 'immediate_source_round',
+                     'source_chain', 'source_close_proof') if k in continuation}
                 continued = True
         if self.state.get('job') != job or self.state.get('execution_workflow') != lab.WORKFLOW:
             raise lab.LocalDispatchDenied('Stage checkpoint job/workflow mismatch')
@@ -334,6 +363,28 @@ class StageSession(module.ModuleSession):
         module.public_only(submission)
         from photo_stage_submission import normalize_submission
         canonical, warnings = normalize_submission(submission)
+        review = canonical.get('review', {}) if isinstance(canonical, dict) else {}
+        effect = review.get('effect_review') if isinstance(review, dict) else None
+        if isinstance(effect, dict):
+            observed = self.state['observations'][-1]['version']
+            matches = [row for row in self.state.get('effect_expectations', [])
+                       if row.get('child_version') == observed and effect.get('expectation_id') in
+                       (row.get('id'), row.get('operation_id'))]
+            if len(matches) == 1 and effect['expectation_id'] != matches[0]['id']:
+                warnings.append({'code': 'exact_operation_expectation_alias',
+                    'field_path': 'review.effect_review.expectation_id', 'original': effect['expectation_id'],
+                    'canonical': matches[0]['id'], 'operation_id': matches[0]['operation_id'],
+                    'version': observed})
+                effect['expectation_id'] = matches[0]['id']
+            actual = next((row for row in reversed(self.state.get('effect_expectations', []))
+                           if row.get('child_version') == observed), None)
+            if actual and any(row.get('expectation_id') == actual['id'] and row.get('version') == observed
+                              for row in self.state.get('effect_reviews', [])):
+                warnings.append({'code': 'redundant_effect_review_not_adopted',
+                    'field_path': 'review.effect_review', 'metadata_extra': copy.deepcopy(effect),
+                    'actual_expectation_id': actual['id'], 'version': observed,
+                    'message': 'The actual effect was already reviewed; this redundant statement changes no prior judgment and does not veto the next explicit action.'})
+                review.pop('effect_review')
         self._turn_normalization = {'original': copy.deepcopy(submission),
                                     'canonical': canonical, 'warnings': warnings}
         from photo_lifecycle_audit import record_lifecycle
@@ -350,6 +401,17 @@ class StageSession(module.ModuleSession):
         self._accepted_turn_state = None
         try:
             result = self._stage_turn(canonical, source_observation_id)
+            if before['current'] != self.state['current']:
+                from photo_working_context import record_branch_change
+                from photo_phase_scheduler import reconcile_debt_applicability
+                event = record_branch_change(self.state, before['current'], canonical['action']['name'], observation_id)
+                reconcile_debt_applicability(self.state, self.state['current'],
+                    selection_event_id=event['id'] if event else None,
+                    observation_id=self.state['observations'][-1]['id'])
+                from photo_proposal_bank import reconcile_dependencies
+                reconcile_dependencies(self.state, observation_id)
+                self.save()
+                result = self.snapshot()
             record_lifecycle(self.folder, self.state, 'turn_after', submission=submission, parent_turn_id=turn_id)
             return result
         except ActionRejected as exc:
@@ -425,7 +487,7 @@ class StageSession(module.ModuleSession):
         reviewed = prior and any(x.get('expectation_id') == prior['id'] and x.get('version') == observation['version']
                                  for x in self.state.get('effect_reviews', []))
         effect = review.get('effect_review')
-        if prior and not reviewed and name in ('photo_edit', 'photo_finish', 'advance'):
+        if prior and not reviewed and name in ('photo_edit', 'pre_tone_wb', 'photo_finish', 'advance'):
             require_action(bool(effect), 'effect_review_required', 'Review the actual prior effect before accepting another action', 'review.effect_review')
         if effect:
             expectation = next((x for x in self.state.get('effect_expectations', []) if x['id'] == effect['expectation_id']), None)
@@ -433,7 +495,7 @@ class StageSession(module.ModuleSession):
                 'effect_review_version', 'Effect review refers to another or unknown version', 'review.effect_review.expectation_id')
             require_action(observation.get('comparison_mode') == 'effect' or effect['outcome'] not in ('supported', 'contradicted'),
                 'effect_view_required', 'A definitive effect comparison requires actually delivered parent/current views', 'review.effect_review.outcome')
-        if name == 'photo_edit':
+        if name in ('photo_edit', 'pre_tone_wb'):
             base = arguments.get('base_version', self.state['current'])
             require_action(base in self.state['versions'] and base == observation['version'], 'edit_base_not_delivered',
                            'Effect expectation must use the actually delivered base version', 'action.arguments.base_version')
@@ -441,11 +503,141 @@ class StageSession(module.ModuleSession):
             require_action(bool(actual), 'operation_modules_required',
                            'The explicit operation must identify known native modules', 'action.arguments')
 
+    def _white_balance_review(self, state, review, observation, phase):
+        if 'wb_assessment' not in review:
+            return None
+        from photo_white_balance import validate_assessment
+        require_action(phase in ('G1', 'G2', 'color', 'G3', 'joint', 'G4'), 'wb_color_view_required',
+                       'White-balance judgment needs actual color views, never gray tone.', 'review.wb_assessment')
+        try:
+            bound = validate_assessment(review['wb_assessment'], observation, require_target=True)
+        except ValueError as exc:
+            raise ActionRejected('wb_assessment_invalid', str(exc), 'review.wb_assessment') from exc
+        bound.update(observation_id=observation['id'], settings_version=observation['version'], phase=phase)
+        records = state.setdefault('wb_assessments', [])
+        if not records or records[-1] != bound:
+            records.append(copy.deepcopy(bound))
+        return bound
+
+    def _white_balance_action_review(self, review, arguments, observation, phase):
+        from photo_white_balance import validate_local_wb_review
+        settings = self.state['versions'][observation['version']]['settings']
+        plan = arguments.get('mask_plan', {})
+        no_existing_create = (phase in ('color', 'joint') and plan.get('action') == 'create'
+            and set(plan.get('values', {})).intersection(('temp', 'tint'))
+            and settings.get('masks') == [] and 'wb_local_review' not in review)
+        if no_existing_create:
+            local = {'decision': 'create', 'existing_mask_ids': [],
+                'region': review.get('effect_expectation', {}).get('target', arguments.get('rationale', '')),
+                'reason': arguments.get('rationale', ''), 'observation_id': observation['id'],
+                'settings_version': observation['version'], 'phase': phase,
+                'claim_type': 'explicit_model_plan_with_actual_empty_mask_list_not_independent_semantic_review'}
+        else:
+            try:
+                local = validate_local_wb_review(review, arguments, settings, phase, observation)
+            except ValueError as exc:
+                adjusted = []
+                if plan.get('action') == 'adjust' and set(plan.get('values', {})).intersection(('temp', 'tint')):
+                    adjusted.append(plan.get('id'))
+                adjusted.extend(command.get('params', {}).get('id') for command in arguments.get('commands', [])
+                    if command.get('id') == 'mask.adjust' and set(command.get('params', {}).get('values', {})).intersection(('temp', 'tint')))
+                actual_ids = {mask.get('id') for mask in settings.get('masks', [])}
+                if adjusted and len(set(adjusted)) == 1 and type(adjusted[0]) is int and adjusted[0] in actual_ids:
+                    local = {'decision': 'reuse', 'mask_id': adjusted[0], 'actual_mask_id': adjusted[0],
+                        'region': review.get('effect_expectation', {}).get('target', arguments.get('rationale', '')),
+                        'reason': arguments.get('rationale', ''), 'observation_id': observation['id'],
+                        'settings_version': observation['version'], 'phase': phase,
+                        'submitted_reuse_review': copy.deepcopy(review.get('wb_local_review')),
+                        'review_warning': str(exc),
+                        'claim_type': 'explicit_model_adjust_id_from_actual_readback_not_inferred_region_equivalence'}
+                else:
+                    raise ActionRejected('wb_mask_reuse_review', str(exc), 'review.wb_local_review') from exc
+        picks = [command for command in arguments.get('commands', []) if command.get('id') == 'develop.wbPick']
+        if picks:
+            dependencies = self.backend().dependencies
+            commands = dependencies.get('commands', []) if isinstance(dependencies, dict) else []
+            require_action(any(row.get('id') == 'develop.wbPick' and row.get('enabled') is True for row in commands),
+                'wb_pick_unavailable', 'Native WB picker is unavailable; choose an explicit scalar WB edit instead, never a guessed picker result.',
+                'action.arguments.commands')
+            assessment = next((row for row in reversed(self.state.get('wb_assessments', []))
+                if row.get('settings_version') == observation['version'] and row.get('reference_status') == 'available'), None)
+            require_action(bool(assessment), 'wb_pick_neutral_reference_required',
+                           'An optional picker needs a qualified current-version neutral reference; use scalar WB otherwise.',
+                           'review.wb_assessment')
+            grounding = review.get('wb_pick_review')
+            require_action(bool(grounding), 'wb_pick_grounding_required',
+                           'Identify a physically neutral source region and full-oriented-source point; never use author/crop coordinates.',
+                           'review.wb_pick_review')
+            for command in picks:
+                require_action(command['params'] == grounding['full_image_point'], 'wb_pick_coordinate_mismatch',
+                               'The reviewed full-source point must exactly match the explicit picker coordinates.',
+                               'review.wb_pick_review.full_image_point')
+                roi = observation.get('view_spec', {}).get('candidate_roi')
+                if roi is not None:
+                    point = command['params']
+                    require_action(roi[0] <= point['x'] <= roi[2] and roi[1] <= point['y'] <= roi[3],
+                        'wb_pick_point_not_observed', 'The full-source point must be visible inside the current source ROI; map coordinates or obtain a suitable view.',
+                        'review.wb_pick_review.full_image_point')
+        return local
+
+    def _white_balance_resolution_review(self, state, review, observation):
+        for disposition in review.get('group_reviews', []):
+            if disposition.get('outcome') != 'resolved':
+                continue
+            from photo_proposal_bank import group_for_review
+            group = group_for_review(state, disposition['issue_id'], disposition['group_id'])
+            if not group or group.get('module') != 'wb':
+                continue
+            assessment = next((row for row in reversed(state.get('wb_assessments', []))
+                if row.get('settings_version') == observation['version']
+                and row.get('target_comparison') and row.get('phase') == observation.get('phase')
+                and row.get('issue_id', disposition['issue_id']) == disposition['issue_id']
+                and (row.get('group_id') is None or
+                     (group_for_review(state, disposition['issue_id'], row['group_id']) or {}).get('id') == group['id'])), None)
+            require_action(bool(assessment), 'wb_target_evidence_required',
+                'Resolving a global WB group needs a target/current assessment of this actual version; effect support alone is not author matching.',
+                'review.group_reviews')
+
+    def _tone_boundary_review(self, state, review, observation):
+        expectation = next((row for row in reversed(state.get('effect_expectations', []))
+                            if row.get('child_version') == observation['version']), None)
+        if not expectation or not review.get('effect_review'):
+            return
+        debt = next((row for row in state['workflow']['review_debts']
+                     if row.get('operation_id') == expectation['operation_id'] and row.get('tone_boundary')), None)
+        if not debt:
+            return
+        if any(row.get('operation_id') == expectation['operation_id'] for row in state.get('tone_boundary_reviews', [])):
+            return
+        value = review.get('tone_boundary_review')
+        require_action(bool(value), 'tone_boundary_review_required',
+            'Review the protected region, feather neighborhood and outside effect, or explicitly state uncertainty in this same effect review.',
+            'review.tone_boundary_review')
+        require_action(value['operation_id'] == expectation['operation_id']
+                       and observation.get('comparison_mode') == 'effect', 'tone_boundary_source',
+                       'Boundary review must bind this actual parent/child operation, not a target or old version.',
+                       'review.tone_boundary_review.operation_id')
+        if value['outcome'] == 'affected':
+            require_action(bool(value.get('joint_handoff_reason', '').strip()), 'tone_boundary_handoff_reason',
+                'Explain the Joint boundary residual, or why immediate small Tone repair is preferable.',
+                'review.tone_boundary_review.joint_handoff_reason')
+            if value.get('joint_group_id'):
+                from photo_proposal_bank import group_for_review
+                group = group_for_review(state, debt['issue_id'], value['joint_group_id'])
+                require_action(group and group.get('branch') == 'joint', 'tone_boundary_joint_group',
+                    'A handoff references an actual Joint group under this same issue; add/revise it in bank_delta.',
+                    'review.tone_boundary_review.joint_group_id')
+        state.setdefault('tone_boundary_reviews', []).append({**copy.deepcopy(value),
+            'observation_id': observation['id'], 'version': observation['version'],
+            'issue_id': debt['issue_id'], 'group_id': debt['group_id'],
+            'claim_type': 'model_boundary_review_not_measured_gray_values'})
+
     def _stage_turn(self, submission, source_observation_id=None):
         from photo_phase_scheduler import PHASES, advance_workflow, resolve_review_debts, revisit_workflow
         from photo_proposal_bank import (apply_bank_delta, resolve_selected_group, record_operation,
                                          record_group_review, invalidate_bank)
-        if self.state.get('pending') is not None or self.state['status'] != 'working':
+        if (self.state.get('pending') is not None or self.state['status'] != 'working'
+                or self.state.get('workflow', {}).get('pre_tone_wb', {}).get('status') == 'in_flight'):
             raise lab.SafetyStop('Workflow has unknown/stopped work; no replay')
         # Validate the closed broad envelope before classifying a known action
         # as outside this phase; unknown native fields remain fatal wire errors.
@@ -461,7 +653,7 @@ class StageSession(module.ModuleSession):
         accepted = copy.deepcopy(self.state)
         normalization = getattr(self, '_turn_normalization', None) or {}
         turn_warnings = copy.deepcopy(normalization.get('warnings', []))
-        if name == 'photo_edit':
+        if name in ('photo_edit', 'pre_tone_wb'):
             actual = list(dict.fromkeys(self._operation_modules(arguments)))
             declared = copy.deepcopy(review['module_decisions'])
             coverage = {'observation_id': observation['id'], 'actual_modules': actual,
@@ -484,17 +676,47 @@ class StageSession(module.ModuleSession):
         bank_before = copy.deepcopy(accepted['proposal_bank'])
         delta = submission.get('bank_delta', [])
         apply_bank_delta(accepted, delta, observation['id'])
+        from photo_proposal_bank import reconcile_dependencies
+        reconcile_dependencies(accepted, observation['id'])
+        if 'review_anchors' in review:
+            from photo_review_anchors import bind_anchors
+            try:
+                bound_anchors = bind_anchors(review['review_anchors'], observation)
+            except ValueError as exc:
+                bound_anchors = []
+                accepted['normalization_warnings'].append({'code': 'optional_anchors_not_adopted',
+                    'field_path': 'review.review_anchors', 'message': str(exc),
+                    'metadata_extra': copy.deepcopy(review['review_anchors']),
+                    'rule': 'No invalid role/cell is promoted to source evidence; debt falls back to explicit unknown focus. Native arguments are unchanged.'})
+            accepted.setdefault('review_anchor_records', []).append({'observation_id': observation['id'],
+                'version': observation['version'], 'anchors': bound_anchors,
+                'submitted_anchors': copy.deepcopy(review['review_anchors'])})
+        wb_assessment = self._white_balance_review(accepted, review, observation, phase)
+        if wb_assessment:
+            from photo_proposal_bank import bind_wb_assessment
+            bind_wb_assessment(accepted, wb_assessment)
+        tone_assessment = None
+        if 'tone_assessment' in review:
+            from photo_tone_guidance import validate_tone_assessment
+            try:
+                tone_assessment = validate_tone_assessment(review['tone_assessment'], observation)
+            except ValueError as exc:
+                raise ActionRejected('tone_assessment_invalid', str(exc), 'review.tone_assessment') from exc
+            accepted.setdefault('tone_assessments', []).append(copy.deepcopy(tone_assessment))
+            from photo_proposal_bank import bind_tone_assessment
+            bind_tone_assessment(accepted, tone_assessment)
         self.state = accepted
         self._record_public_review(current['decision_judgment'], current)
         self.save()
         self._accepted_turn_state = copy.deepcopy(self.state)
         permitted = {b['properties']['name']['const'] for b in self.tool_schemas()['photo_stage_turn']['properties']['action']['oneOf']}
         require_action(name in permitted, 'action_outside_phase', 'Current action is outside the authoritative phase', 'action.name')
-        if name == 'photo_edit':
+        if name in ('photo_edit', 'pre_tone_wb'):
             from photo_stage_schema import stage_edit_schema
             # The same fields already passed the broad native contract. Only a
             # known phase narrowing can fail this pure schema check.
-            for field, spec in stage_edit_schema(phase).items():
+            scope = 'pre_tone_wb' if name == 'pre_tone_wb' else phase
+            for field, spec in stage_edit_schema(scope).items():
                 if field in arguments:
                     try:
                         _validate_contract(arguments[field], spec, 'action.arguments.' + field)
@@ -505,11 +727,35 @@ class StageSession(module.ModuleSession):
         # The action transaction reviews the prior operation before reassessing
         # proposals, so a same-turn keep/revise can make its next group eligible.
         draft['proposal_bank'] = copy.deepcopy(bank_before)
+        self._white_balance_resolution_review(draft, review, observation)
         record_group_review(draft, review, observation['id'])
         apply_bank_delta(draft, delta, observation['id'])
+        from photo_proposal_bank import reconcile_dependencies
+        reconcile_dependencies(draft, observation['id'])
+        if wb_assessment:
+            from photo_proposal_bank import bind_wb_assessment
+            bind_wb_assessment(draft, wb_assessment)
+        if tone_assessment:
+            from photo_proposal_bank import bind_tone_assessment
+            bind_tone_assessment(draft, tone_assessment)
+        self._tone_boundary_review(draft, review, observation)
         if submission.get('review_debt_updates'):
-            resolve_review_debts(draft, submission['review_debt_updates'], observation['id'])
+            updates = submission['review_debt_updates']
+            try:
+                resolve_review_debts(draft, updates, observation['id'])
+            except (ActionRejected, ValueError) as exc:
+                # Debt evidence is independent of an explicit legal action.
+                # Refusing its adoption must not silently resolve it or veto IO.
+                deferred = {'observation_id': observation['id'], 'version': observation['version'],
+                    'phase': phase, 'submitted_updates': copy.deepcopy(updates), 'reason': str(exc),
+                    'disposition': 'not_adopted_debts_unchanged'}
+                draft.setdefault('deferred_debt_reviews', []).append(deferred)
+                draft.setdefault('normalization_warnings', []).append({
+                    'code': 'debt_updates_not_adopted', 'field_path': 'review_debt_updates',
+                    **copy.deepcopy(deferred),
+                    'message': 'No debt was resolved by this invalid/untimely batch. Continue the explicit legal action and reassess pending debt on a qualified checkpoint.'})
         selected_group = None
+        local_wb_review = None
         action_context = copy.deepcopy(submission['action'])
         action_context.update({key: submission[key] for key in ('selection_reason', 'override_reason') if key in submission})
         if name == 'advance':
@@ -528,6 +774,18 @@ class StageSession(module.ModuleSession):
             if phase == 'G4' or (target is not None and target != next_phase):
                 revisit_workflow(draft, arguments['reason'], observation['id'], target)
             else:
+                if phase == 'G1':
+                    assessment = next((row for row in reversed(draft.get('tone_assessments', []))
+                        if row.get('phase') == 'G1' and row.get('settings_version') == selected), None)
+                    require_action(bool(assessment), 'tone_assessment_required',
+                        'Record structural/chroma/uncertain attribution or explicitly no relevant difference in this same G1 turn.',
+                        'review.tone_assessment')
+                if phase == 'G2':
+                    assessment = next((row for row in reversed(draft.get('wb_assessments', []))
+                        if row.get('phase') == 'G2' and row.get('settings_version') == selected), None)
+                    require_action(bool(assessment), 'wb_assessment_required',
+                        'Record the current G2 WB basis, or explicitly no reliable reference/no WB task, in this same turn.',
+                        'review.wb_assessment')
                 # The bank was already ingested; validate G2 against that exact
                 # original delta without applying it a second time.
                 advance_workflow(draft, arguments['reason'], observation['id'], selected,
@@ -539,36 +797,113 @@ class StageSession(module.ModuleSession):
             self.state = draft
             # Record effect acceptance only after the whole transition validated.
             self.act('photo_history', {'review': copy.deepcopy(review)}, observation['id'])
+            self.state['implicit_history_projection'] = True
             self.state['stage_phase'] = self.state['workflow']['phase'] if self.state['workflow']['phase'] in ('tone', 'color', 'joint') else 'joint'
             self.save()
             self.observe(self.state['current'], args={'comparison_mode': 'target'}, requested=False)
         else:
-            if name == 'photo_edit':
+            if name in ('photo_edit', 'pre_tone_wb'):
                 base = arguments.get('base_version', self.state['current'])
                 require_action(bool(submission.get('selected_issue_id')), 'issue_selection_required',
                                'Select an explicit bank issue for the current edit group', 'selected_issue_id')
                 selected_group = resolve_selected_group(draft, submission['selected_issue_id'],
                     submission.get('selected_group_id'), base, action=action_context)
+                scope = self.state['stage_phase']
+                if name == 'pre_tone_wb':
+                    from photo_pre_tone import validate_request
+                    validate_request(draft, review, observation)
+                    scope = 'pre_tone_wb'
+                else:
+                    local_wb_review = self._white_balance_action_review(review, arguments, observation, phase)
                 from photo_stage_operations import validate_stage_operation
-                validate_stage_operation(arguments, draft['versions'][base]['settings'],
-                    self.state['stage_phase'], self.backend().dependencies, controls=self.backend().controls())
+                try:
+                    validate_stage_operation(arguments, draft['versions'][base]['settings'],
+                        scope, self.backend().dependencies, controls=self.backend().controls())
+                except ValueError as exc:
+                    raise ActionRejected('stage_operation_invalid', str(exc), 'action.arguments') from exc
+                from photo_working_context import geometry_proximity
+                proximity = geometry_proximity(draft['versions'][base]['settings'], arguments.get('mask_plan'))
+                draft['geometry_warnings'] = [{**row, 'source_observation_id': observation['id'],
+                    'base_version': base, 'claim_type': 'host_geometry_hint_not_semantic_equivalence'} for row in proximity]
             elif name == 'photo_finish':
                 self._validate_finish(arguments, observation, phase)
             self.state = draft
             arguments['review'] = copy.deepcopy(review)
             before = self.state['current']
-            self.act(name, arguments, observation['id'])
-            if name == 'photo_edit':
+            if name == 'pre_tone_wb':
+                self.state['stage_phase'] = 'pre_tone_wb'
+                self.state['workflow']['pre_tone_wb'] = {'status': 'in_flight', 'base_version': before,
+                    'source_observation_id': observation['id'], 'tone_basis_impact': review['tone_basis_impact']}
+                self.save()
+                self.act('photo_edit', arguments, observation['id'])
+                child = self.state['current']
+                actual = self.state['versions'][child]
+                self.state['workflow']['pre_tone_wb'].update(status='succeeded', child_version=child,
+                    operation_id=actual['operation_id'], expectation_id=actual['expectation_id'])
+                self.state['stage_phase'] = 'joint'
+                history = next(row for row in reversed(self.state['history'])
+                               if row.get('operation_id') == actual['operation_id'] and row.get('action') == 'edit')
+                history['stage_action'] = 'pre_tone_wb'
+            else:
+                self.act(name, arguments, observation['id'])
+            if name in ('photo_edit', 'pre_tone_wb'):
                 child = self.state['current']
                 record_operation(self.state, submission['selected_issue_id'],
                     self.state['versions'][child]['operation_id'], arguments.get('base_version', before), child,
                     group_id=selected_group['id'], action=action_context)
                 invalidate_bank(self.state, child)
-                if phase in ('tone', 'color'):
+                base_version = arguments.get('base_version', before)
+                if local_wb_review:
+                    if local_wb_review.get('decision') == 'create':
+                        previous_ids = {mask['id'] for mask in self.state['versions'][base_version]['settings'].get('masks', [])}
+                        created = [mask['id'] for mask in self.state['versions'][child]['settings'].get('masks', [])
+                                   if mask['id'] not in previous_ids]
+                        if len(created) != 1:
+                            raise RuntimeError('Completed local WB creation has ambiguous actual mask readback; retain execution evidence')
+                        local_wb_review['actual_mask_id'] = created[0]
+                    else:
+                        local_wb_review['actual_mask_id'] = local_wb_review['mask_id']
+                    self.state.setdefault('wb_mask_usage', []).append({**copy.deepcopy(local_wb_review),
+                        'operation_id': self.state['versions'][child]['operation_id'], 'base_version': base_version,
+                        'child_version': child, 'issue_id': submission['selected_issue_id'], 'group_id': selected_group['id']})
+                from photo_working_context import mask_geometry_changes
+                geometry_changes = mask_geometry_changes(self.state['versions'][base_version]['settings'],
+                                                         self.state['versions'][child]['settings'])
+                if phase in ('tone', 'color') or (phase == 'joint' and geometry_changes):
                     from photo_phase_scheduler import add_review_debt
-                    add_review_debt(self.state, {'id': 'debt:' + self.state['versions'][child]['operation_id'],
-                        'due_phase': 'G2' if phase == 'tone' else 'G3', 'version': child,
-                        'reason': 'Review color consequences of gray tone work' if phase == 'tone' else 'Reassess accepted tone after color work'})
+                    from photo_review_anchors import build_debt_focus
+                    operation_id = self.state['versions'][child]['operation_id']
+                    debt = {'id': 'debt:' + operation_id, 'schema': 'photo-review-debt/v2',
+                        'focus': build_debt_focus(review, observation, operation_id, review['effect_expectation']),
+                        'due_phase': 'G2' if phase == 'tone' else 'G3' if phase == 'color' else 'G4', 'version': child,
+                        'operation_id': self.state['versions'][child]['operation_id'], 'base_version': base_version,
+                        'issue_id': submission['selected_issue_id'], 'group_id': selected_group['id'],
+                        'reason': 'Review color consequences of gray tone work' if phase == 'tone' else 'Reassess accepted tone after color work'}
+                    if geometry_changes:
+                        debt['mask_geometry_changes'] = geometry_changes
+                        debt['geometry_review_reason'] = 'Geometry/visibility/inversion can change accepted Tone and WB coverage; review actual color boundaries and protected regions, not just unchanged numeric sliders.'
+                    from photo_tone_guidance import tone_boundary_detail, color_luminance_detail
+                    if phase == 'tone':
+                        boundary = tone_boundary_detail(self.state['versions'][base_version]['settings'],
+                            self.state['versions'][child]['settings'], arguments, review['effect_expectation'])
+                        if boundary:
+                            debt.update(kind='tone_boundary_color_review', tone_boundary=boundary,
+                                reason='Recheck actual Tone mask boundary and protected region after color returns; grayscale fusion does not prove color-edge safety.')
+                    if phase == 'color':
+                        luminance = color_luminance_detail(self.state['versions'][base_version]['settings'],
+                                                           self.state['versions'][child]['settings'])
+                        if luminance:
+                            debt.update(kind='color_luminance_tone_review', hsl_luminance_changes=luminance,
+                                reason='Review actual HSL luminance changes against the accepted tone skeleton; do not compensate the same color-associated region twice.')
+                        from photo_white_balance import coupling_detail
+                        coupling = coupling_detail(self.state['versions'][base_version]['settings'],
+                                                   self.state['versions'][child]['settings'], action_context)
+                        if coupling:
+                            debt.update(kind='wb_tone_coupling', wb_coupling=coupling,
+                                reason='Review actual WB tone coupling in affected regions: highlight detail, shadow support and accepted environment color; adjust only justified small Joint residuals.',
+                                wb_assessment_ref=copy.deepcopy(self.state.get('wb_assessments', [])[-1:]),
+                                local_wb_review=copy.deepcopy(local_wb_review))
+                    add_review_debt(self.state, debt)
             if name == 'photo_finish' and self.state.get('export') and not arguments.get('confirm_export') and phase == 'joint':
                 advance_workflow(self.state, arguments.get('rationale', 'Inspect actual exported JPEG'),
                     observation['id'], self.state['current'])
@@ -577,6 +912,8 @@ class StageSession(module.ModuleSession):
             elif name == 'photo_finish' and arguments.get('confirm_export'):
                 advance_workflow(self.state, arguments.get('rationale', 'Actual JPEG reviewed'),
                     observation['id'], self.state['current'])
+        from photo_pre_tone import accepted_effect
+        accepted_effect(self.state, review, observation)
         self.state.pop('stage_turn_result', None)
         if self.state.get('tool_result', {}).get('kind') == 'rejected_before_execution':
             # A completed action supersedes the previous recoverable refusal.
@@ -624,8 +961,8 @@ class StageSession(module.ModuleSession):
         for decision in review.get('module_decisions', []):
             module.canonical_module(decision['module'])
             ident = decision['module']
-            if ident in seen:
-                raise ValueError('Duplicate module decision')
+            # A model may discuss a slider family separately from its module.
+            # Preserve all declarations; typed action coverage is authoritative.
             seen.add(ident)
 
     def normalize_public_review(self, review):
@@ -634,7 +971,8 @@ class StageSession(module.ModuleSession):
         if any(not isinstance(value, str) for value in result.values()):
             raise ValueError('Public comparison metadata must be strings')
         result['previous_outcome'] = review.get('previous_outcome', 'uncertain')
-        for key in ('judgment_items', 'group_reviews'):
+        for key in ('judgment_items', 'group_reviews', 'wb_assessment', 'wb_local_review', 'wb_pick_review',
+                    'tone_assessment', 'tone_basis_impact', 'tone_boundary_review', 'review_anchors'):
             if key in review:
                 result[key] = copy.deepcopy(review[key])
         result['review_quality'] = 'explicit' if result['visible_comparison'].strip() else 'missing_visible_comparison'
@@ -683,6 +1021,8 @@ class StageSession(module.ModuleSession):
             validate_stage_operation(args, self.state['versions'][base]['settings'],
                                      self.state.get('stage_phase', 'joint'), self.backend().dependencies,
                                  controls=self.backend().controls())
+        if name == 'photo_history':
+            self.state['implicit_history_projection'] = False
         if name == 'photo_discover':
             query = {k: args.get(k) for k in ('kind', 'query', 'exact_ids', 'module', 'offset', 'page_size', 'result_id')}
             query['kind'] = query.get('kind') or 'catalog'
@@ -746,9 +1086,9 @@ class StageSession(module.ModuleSession):
         phase = self.state['workflow']['phase']
         original = item.get('color_views', item['views'])
         item['color_views'] = copy.deepcopy(original)
-        item['views'] = derive_stage_views(original, phase, self.folder / 'stage-observations', item['id'], grid=phase == 'tone')
+        item['views'] = derive_stage_views(original, phase, self.folder / 'stage-observations', item['id'], grid=phase in ('G1', 'tone', 'G2', 'color', 'G3', 'joint', 'G4'))
         item['phase'] = phase
-        item['stage_observation'] = stage_observation_metadata(phase, item['id'], grid=phase == 'tone')
+        item['stage_observation'] = stage_observation_metadata(phase, item['id'], grid=phase in ('G1', 'tone', 'G2', 'color', 'G3', 'joint', 'G4'))
         self.save()
         return item
 
@@ -758,7 +1098,7 @@ class StageSession(module.ModuleSession):
         item = self.state['observations'][-1]
         phase = self.state['workflow']['phase']
         item['phase'] = phase
-        item['stage_observation'] = stage_observation_metadata(phase, item['id'], grid=False)
+        item['stage_observation'] = stage_observation_metadata(phase, item['id'], grid=phase in ('G1', 'tone', 'G2', 'color', 'G3', 'joint', 'G4'))
         self.save()
         return self.snapshot()
 
@@ -821,11 +1161,16 @@ class StageSession(module.ModuleSession):
     def _history_records(self):
         rows, seen = [], set()
         for key, kind in (('workflow_submissions', 'workflow_turn'), ('stage_rejections', 'stage_rejection'),
+                          ('branch_reset_events', 'branch_reset'), ('review_anchor_records', 'review_anchors'),
+                          ('wb_mask_usage', 'wb_mask_usage'), ('wb_assessments', 'wb_assessments'),
+                          ('tone_assessments', 'tone_assessments'), ('tone_boundary_reviews', 'tone_boundary_reviews'),
+                          ('deferred_debt_reviews', 'deferred_debt_reviews'),
                           ('effect_expectations', 'prediction'), ('effect_reviews', 'effect_review'),
                           ('module_rule_archive', 'discovery'), ('module_public_records', 'module_decision'),
                           ('public_decisions', 'decision'), ('decision_memory', 'memory'), ('history', 'action')):
             for index, item in enumerate(self.state.get(key, [])):
-                ident = item.get('id') or kind + '-' + str(index)
+                ident = item.get('id') or key + ':' + str(index) if key in (
+                    'wb_mask_usage', 'wb_assessments', 'tone_assessments', 'tone_boundary_reviews') else item.get('id') or kind + '-' + str(index)
                 if ident in seen:
                     ident = kind + ':' + ident + ':' + str(index)
                 seen.add(ident)
@@ -838,6 +1183,10 @@ class StageSession(module.ModuleSession):
                     if ident and ident not in seen:
                         seen.add(ident)
                         rows.append({'id': ident, 'kind': 'textbook_card', 'record': copy.deepcopy(card)})
+        for debt in self.state.get('workflow', {}).get('review_debts', []):
+            rows.append({'id': debt['id'], 'kind': 'review_debt', 'record': copy.deepcopy(debt)})
+        for event in self.state.get('workflow', {}).get('events', []):
+            rows.append({'id': event['id'], 'kind': 'workflow_event', 'record': copy.deepcopy(event)})
         audit_path = self.folder / 'audit/events.jsonl'
         if audit_path.exists():
             for line in audit_path.read_text(encoding='utf-8').splitlines():
@@ -846,6 +1195,15 @@ class StageSession(module.ModuleSession):
         from photo_proposal_bank import bank_history
         for item in bank_history(self.state):
             rows.append({'id': item['record_id'], 'kind': 'proposal_bank', 'record': item})
+        bank = self.state.get('proposal_bank', {})
+        for event in bank.get('events', []):
+            rows.append({'id': event['id'], 'kind': 'proposal_bank_event', 'record': copy.deepcopy(event)})
+        for issue in bank.get('issues', {}).values():
+            for group in issue.get('task_groups', {}).values():
+                for item in group.get('records', []):
+                    rows.append({'id': item['record_id'], 'kind': 'proposal_group', 'record': copy.deepcopy(item)})
+                for item in group.get('waiver_records', []):
+                    rows.append({'id': item['record_id'], 'kind': 'dependency_waiver', 'record': copy.deepcopy(item)})
         return rows
 
     def _history_result(self, arguments, observation):
@@ -961,11 +1319,11 @@ class StageSession(module.ModuleSession):
         result = super().snapshot()
         phase = self.state['workflow']['phase']
         guides = {
-            'G1': 'First full-color diagnosis: submit public judgment_items for tonal/color differences and protection. Add relevant tone/color issues to bank_delta using op:add,id,branch,diagnosis,priority,proposed_controls. Then action advance with reason enters gray tone. If no adjustments are justified, explicitly explain that comparison rather than inventing issues.',
-            'tone': 'Only grayscale is supplied. Prioritize one tonal issue, explicitly keep/revise its bank item against the current observed version, select its ID and submit a small legal tonal group. After real effect review, continue, inspect target/ROI, or advance with reason and the actually observed selected version to G2.',
-            'G2': 'Full color after tone. Reassess the relevant color/joint issues against this actual version, preserve deferred or uncertain items and choose the next useful color work. Reassessment and review debt are incremental records, not an all-items-at-once administrative gate. Existing bank/group updates carry the decisions; do not duplicate whole checklists. Advance enters color; each actual edit still selects a fresh current group.',
-            'color': 'Choose one current color issue. Keep/revise bank against the actual current observation, selected_issue_id links the edit. Global color tools and local mask temp/tint only; preserve accepted tone. Review actual parent/current effect before further edit or advance to G3.',
-            'G3': 'Full color integrated diagnosis. Explicitly resolve pending due G3 debts, update/add joint issues and priorities, then advance enters joint. Keep already adequate areas protected.',
+            'G1': 'Full-color diagnosis: record review.tone_assessment with structural/chroma/uncertain regional attribution and qualified neutral black/white/midtone anchors, or explicitly no relevant differences/anchors. Chroma is a revisable hypothesis, not proof of author HSL edits. Explicit bank_delta routes justified color luminance to Color; host never invents controls. Protect these regions from purposefully replacing color work with grayscale exposure/curve compensation. Default advance enters Tone. Only for a severe cast obstructing the tone basis, optional once-only pre_tone_wb submits explicit scalar WB, current wb_assessment needed, tone_basis_impact and selected WB fine group; after success review actual color effect then fresh full G1 target before Tone. G1 never exposes general photo_edit.',
+            'tone': 'Only grayscale is supplied. Use carried G1 color attribution as historical protection, never claim newly seen colors. Default neutral-first: usable black/white support, then low-saturation midtone contrast/simple Master curve, then broad physical lighting residuals with simple masks. Order is soft, no required knob walk or forced 0/1 endpoints. Do not use exposure/highlights to imitate a specifically deferred chroma-lightness task; actual global tone may still affect it with an explicit protected tradeoff. Master curve reset or 2-5 monotone-y points, typically three main anchors plus optional edge supports; no complex waves. After local effect, explicitly assess protected core/feather/outside in tone_boundary_review; same-issue Joint handoff handles justified fine-boundary residuals, not contour-chasing. Keep/revise/select one actual current fine group, review and act in the same turn, or advance the actually observed selected version to G2. Eighteen Tone requests are guidance, not a cap.',
+            'G2': 'Full color after tone. Record review.wb_assessment on this actual target/current version: identify 1-2 independent author/current midtone low-saturation reference cells with material/lighting qualification, or explicitly not_available. Distinguish physical neutrality from intended environment color; route justified shadow/highlight atmosphere to grading and spatial light differences to local WB, not blanket global warming. No reliable reference and no WB task are valid explicit outcomes. Reassess only relevant color/joint issues; no whole-bank checklist. The assessment, bank update and advance may occur in this same turn.',
+            'color': 'Use work_packet.white_balance actual WB readback, reference basis and existing masks. Prefer attributable small absolute WB edits, one axis first; 2-3 rounds and step sizes are guidance, never gates. Optional develop.wbPick requires physical-neutral source grounding in review.wb_pick_review, full-oriented-source coordinates and actual enabled backend support; it samples a source thumbnail, not the delivered rendered target. Local WB needs review.wb_local_review: reuse the actual ID for the same suitable region, or explain why existing masks do not cover this distinct purpose. Color only patches local temp/tint, preserving prior tone. Effect supported means response matched a prediction, not author matching; resolve WB only with target evidence and reopen by explicit revise when new evidence contradicts it.',
+            'G3': 'Full color integrated diagnosis. Review pending G3 WB tone-coupling debt on actual author/current regions: highlight detail, shadow support and skin where present. Explicitly resolve or accept a justified tradeoff; unreviewed debt remains pending, not a checklist gate. New global yellow/green evidence may revise/reopen an accepted WB baseline. Add only justified small Joint exposure/highlights or WB residuals; keep adequate areas protected.',
             'joint': 'Use small justified residual groups only, always selected_issue_id and a fresh/reassessed bank item for an edit. After reviewing the selected version, photo_finish confirm_export:false produces actual JPEG and opens G4; do not use advance to skip export.',
             'G4': 'The supplied current image comes from actual JPEG. photo_finish confirm_export:true confirms this reviewed export; partial/unresolved is valid. If a correction is justified, advance target_phase:joint with reason; old export confirmation is invalidated and a new actual JPEG must be observed.',
             'complete': 'Task terminal; no more actions.'}
@@ -975,6 +1333,11 @@ class StageSession(module.ModuleSession):
             original = next(row for row in self.state['effect_expectations'] if row['id'] == pending['id'])
             pending['effect_expectation'] = copy.deepcopy(original['effect_expectation'])
             pending['review_focus'] = copy.deepcopy(original['effect_expectation'])
+            boundary = next((debt.get('tone_boundary') for debt in self.state['workflow']['review_debts']
+                if debt.get('operation_id') == original['operation_id'] and debt.get('tone_boundary')), None)
+            if boundary:
+                pending['tone_boundary'] = copy.deepcopy(boundary)
+                pending['boundary_review_instruction'] = 'Include review.tone_boundary_review {operation_id,outcome:protected|affected|uncertain,evidence,joint_handoff_reason?,joint_group_id?}. Inspect protected core, feather neighborhood and outside; report visible effects, never numeric gray samples. If affected, explain same-issue Joint handoff or immediate small repair; do not chase pixel contours with simple gradients.'
             linked = next((event for event in self.state['proposal_bank']['events']
                            if event.get('kind') == 'operation' and event.get('operation_id') == original['operation_id']), None)
             if linked:
@@ -996,13 +1359,69 @@ class StageSession(module.ModuleSession):
         workflow = copy.deepcopy(self.state['workflow'])
         workflow['contract_revision'] = self.contract_revision()
         # Full workflow submissions and bank revisions are accessible by history.
-        workflow['events'] = workflow['events'][-3:]
+        workflow['events'] = [{key: copy.deepcopy(value) for key, value in event.items()
+            if key not in ('debt', 'updates', 'wb_assessment', 'tone_assessment')}
+            for event in workflow['events'][-3:]]
+        for debt in workflow['review_debts']:
+            debt['history_record_id'] = debt['id']
+            if debt.get('status') != 'pending':
+                for key in ('focus', 'checks', 'review_update', 'wb_coupling', 'wb_assessment_ref',
+                            'local_wb_review', 'tone_boundary', 'mask_geometry_changes', 'hsl_luminance_changes'):
+                    debt.pop(key, None)
+            elif debt.get('focus'):
+                debt['original_expectation'] = copy.deepcopy(debt['focus'][0].get('expectation', {}))
+                debt['focus'] = [{key: copy.deepcopy(value) for key, value in focus.items()
+                    if key not in ('context', 'expectation')} for focus in debt['focus']]
         result['context'].update(stage_runtime={'schema': SCHEMA, 'build': BUILD,
             'resource_profile_id': RESOURCE_PROFILE, 'phase': workflow['phase']},
             workflow=workflow, contract_revision=self.contract_revision(),
             proposal_bank=bank_projection(self.state, workflow['phase']),
             stage_observation=copy.deepcopy(self.state['observations'][-1].get('stage_observation')))
-        result['context']['work_packet'] = copy.deepcopy(result['context']['proposal_bank'].get('work_packet', {}))
+        from photo_white_balance import work_context
+        observation = self.state['observations'][-1]
+        observed_settings = self.state['versions'][observation['version']]['settings']
+        packet = copy.deepcopy(result['context']['proposal_bank'].get('work_packet', {}))
+        if phase in ('G1', 'G2', 'color', 'G3', 'joint', 'G4'):
+            packet = {'white_balance': work_context(self.state, phase, observed_settings, observation), **packet}
+        from photo_tone_guidance import work_context as tone_work_context
+        packet = {'tone': tone_work_context(self.state, phase, observation), **packet}
+        packet['pre_tone_wb'] = {'available': phase == 'G1' and self.state['workflow'].get('pre_tone_wb') is None,
+            'lifecycle': copy.deepcopy(self.state['workflow'].get('pre_tone_wb')),
+            'rule': 'Optional once-only scalar global WB for a severe cast obstructing the tone basis; not a default prerequisite. After success review color effect, then fresh full G1 target before Tone. Unknown never retries.'}
+        from photo_working_context import selected_baseline, active_masks_summary
+        baseline = selected_baseline(self.state, observation)
+        packet = {'branch_reset_notice': baseline.get('branch_reset_notice'),
+                  'selected_baseline': baseline,
+                  'active_masks_summary': active_masks_summary(self.state, observation, self.input.get('original_dimensions')),
+                  **packet}
+        result['context']['proposal_bank']['work_packet'] = {'$ref': 'context.work_packet',
+            'compatibility': 'The authoritative packet body appears once at context.work_packet; full bank history remains retrievable.'}
+        result['context']['work_packet'] = packet
+        result['context']['geometry_warnings'] = copy.deepcopy(self.state.get('geometry_warnings', []))
+        tool_result = result['context'].get('tool_result')
+        if self.state.get('implicit_history_projection') and isinstance(tool_result, dict) and tool_result.get('kind') == 'history':
+            result['context']['tool_result'] = {'kind': 'history_index', 'implicit_after_advance': True,
+                'total': tool_result.get('total'), 'record_refs': [{'id': row['id'], 'kind': row.get('kind')}
+                    for row in tool_result.get('records', [])],
+                'instruction': 'Full records were not deleted. Explicit photo_history/detail_get retrieves original content.'}
+        result['context']['public_contract_help']['memory'] = (
+            'Top-level context.work_packet is the single body; proposal_bank.work_packet is its explicit reference. '
+            'selected_baseline identifies actual root-to-selected operations; BRANCH RESET NOTICE marks inactive historical branches, not failed or deleted evidence. Observed old version is not selected. '
+            'group_reviews skip is a reasoned proposal disposition, never an effect. Legacy dependencies are soft; typed {group_id|issue_id,kind:soft|hard,requirement:disposition|effect,operation_id?} require actual branch-applicable evidence for hard effects. '
+            'active_masks_summary shows all actual IDs including hidden masks. Same-kind center distance below 0.1 is a non-blocking geometry hint, not semantic equivalence or a request for an extra confirmation turn. '
+            'Optional review.review_anchors [{id,purpose:target|protected,extent:explicit_cells|full_frame|unknown,view_role:author|current|effect_parent|effect_current,cells?,region,qualification}] uses actual view grid/ROI; never guess cells from old text or mask geometry. '
+            'New review_debt_updates use {id,resolution:no_regression|minor_acceptable|spawn_joint_task,reason,checks:[{focus_id,outcome,evidence,review_region,review_cells?}],joint_diagnosis?,existing_joint_issue_id?}. '
+            'Each due focus needs current-color-target evidence; unavailable evidence remains pending without blocking progress. spawn_joint_task creates a diagnosis with groups:[], not controls or native action; reviewed_joint_task means reviewed-and-routed, not photographically fixed.')
+        result['context']['public_contract_help']['tone'] = (
+            'G1 tone_assessment {items:[{id,author_region,current_region,material,lighting,attribution:structure|chroma|uncertain,evidence,protection,handoff:tone|color|joint,issue_id?,group_id?}],neutral_anchors:[{role:black_support|white_support|midtone,author_region,current_region,qualification}],reason}. '
+            'Empty items/anchors and uncertain are valid. Color-purpose hypotheses remain revisable; explicit bank_delta creates any actual task. '
+            'pre_tone_wb requires scalar values only, selected issue/group, normal edit expectations, wb_assessment needed and tone_basis_impact; no new top-level tool or general G1 edit. '
+            'tone_boundary_review {operation_id,outcome:protected|affected|uncertain,evidence,joint_handoff_reason?,joint_group_id?} reviews actual effect only; HSL-L and WB consequences share the original G3 debt.')
+        result['context']['public_contract_help']['white_balance'] = (
+            'wb_assessment is target/current visual evidence, never numeric pixel sampling. G2 can explicitly report no reference or no task. '
+            'wb_pick_review requires neutrality_basis/source_region/coordinate_space:full_oriented_source/full_image_point{x,y}/roi_mapping_reason; '
+            'the point must match the atomic command, not author or crop coordinates. wb_local_review explains reuse/create against actual IDs. '
+            'All current settings are actual controls; steps are guidance, resolved is revisable, effect response is not target correctness.')
         return result
 
 

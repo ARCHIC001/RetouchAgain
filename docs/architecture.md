@@ -87,3 +87,14 @@ RetouchAgain 是一个用于**图像后期调色与参考图仿色（Color/Tone 
 | `src/photo_proposal_bank.py` | 建议库管理、执行账本与工作包构建 |
 | `src/photo_stage_schema.py` | 动态生成当前阶段的提交 Schema |
 | `src/photo_stage_operations.py` | 阶段控件白名单校验与蒙版原子事务 |
+
+
+---
+
+## v20追加：三专项与合同承接
+
+> 发布派生版/非历史原稿。既有正文完整保留，本节补充后续机制。
+
+截至v20，Tone推荐路线为黑白场→曝光→高光阴影→对比→简约Master曲线→参数曲线→必要局部→收束，仅软默认。G1可分类保存全部后续阶段建议；可选前置WB是一次成功资格的窄action，不开放G1通用编辑。
+
+新增 [WB](white-balance-v20.md)、[Tone](tone-guidance-v20.md)、[记忆与区域复核](memory-review-v20.md) 分别说明基准与局部复用、归因与边界、typed依赖与focus；[版本承接与使用](v20-update-and-usage.md)说明v20协议、运行前提和闭合继续。公开raw／canonical／warning分留，已知no-effect与unknown结果严格区分，磁盘修复不冒热加载。

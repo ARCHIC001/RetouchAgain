@@ -11,8 +11,23 @@ from photo_stage_continuation import load_continuation
 
 
 class ContinuationChecks(unittest.TestCase):
+    def test_pre_tone_lifecycle_cannot_be_erased_or_replayed_by_transfer(self):
+        from photo_pre_tone import validate_transfer
+        record = {'status': 'succeeded', 'base_version': 'v0', 'child_version': 'v1',
+                  'operation_id': 'synthetic-op', 'effect_review_observation_id': 'o2'}
+        source = {'workflow': {'pre_tone_wb': record}}
+        continued = copy.deepcopy(source)
+        validate_transfer(source, continued)
+        for changed in ({'workflow': {}}, {'workflow': {'pre_tone_wb': {**record, 'operation_id': 'invented'}}}):
+            with self.assertRaisesRegex(ValueError, 'preserve'):
+                validate_transfer(source, changed)
+        unknown = {'workflow': {'pre_tone_wb': {**record, 'status': 'in_flight'}}}
+        with self.assertRaisesRegex(ValueError, 'in-flight/unknown'):
+            validate_transfer(unknown, copy.deepcopy(unknown))
+
     def test_explicit_closed_source_and_actual_artifact_identity(self):
         latest = Path(__file__).resolve().parents[1] / 'experiments/validation/latest'
+        latest.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='continuation-SYNTHETIC-', dir=latest) as directory:
             root = Path(directory)
             source = root / 'experiments/runs/source'

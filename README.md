@@ -168,3 +168,21 @@ python -I -B -X utf8 src/check_photo_stage_continuation.py
 ```
 
 详细依赖与环境变量（`VISHARNESS_PYTHON`、`VISHARNESS_FULL_AUTHOR_ROOT`、`VISHARNESS_DNG_CONVERTER`）配置请参见 [环境搭建与运行范围](docs/scope-and-environment.md)，完整文件清单见 [publication-scope.json](publication-scope.json)。
+
+
+---
+
+## 8. 截至 v20 的新增设计与使用说明
+
+> 发布派生版/非历史原稿。本节为追加更新；前文经过优化的说明完整保留。
+
+当前源码为 `dsh-stage-runtime-v20-20261114`／资源 `stage-resource/v20`，外层协议 v2、动态阶段合同 v3。新增内容集中在以下独立说明，不回改前文：
+
+- [白平衡：视觉基准、实际读回与同ID局部复用](docs/white-balance-v20.md)
+- [Tone：归因隔离、neutral-first与边界交接](docs/tone-guidance-v20.md)
+- [记忆：依赖、真实分支、区域focus与稳定引用](docs/memory-review-v20.md)
+- [v20使用前提、闭合续接与追加式维护](docs/v20-update-and-usage.md)
+
+新增 Tone 路线优先黑白场支撑后建立中灰骨架；原字符串软依赖仍兼容，typed依赖区分soft／hard与处置／实际effect。待复核债务不自动冒已解决，也不以不合格的附带表单阻挡无关合法动作。前文五个合成入口之外的新增入口以 [publication-scope.json](publication-scope.json) 为准。
+
+独立合成测试、工具执行成功和工作流complete都不等于摄影目标达成或作者认可。仓库不附带现场资格、收费授权、实验结果或第三方安装；已有示例三文件范围不扩展。

@@ -70,3 +70,14 @@
 - `src/photo_stage_operations.py`：阶段控件校验、单位检查与蒙版原子事务。
 - `src/photo_capability_catalog.py`、`src/photo_native_commands.py`：原生命令映射与几何参数契约。
 - `src/photo_stage_schema.py`、`src/dsh_stage_worker.py`：动态合同生成与版本/渲染编排。
+
+
+---
+
+## v20追加：局部复用与边界
+
+> 发布派生版/非历史原稿。保留前文操作说明，补充当前兼容规则。
+
+Tone局部六项影调／Color局部Temp与Tint／Joint八项保持；同实际ID patch保留已有字段，新建绑定真实ID、all-20中性后才写目标。真实mask清单为空且明确create时不强迫空复用表；明确唯一actual ID adjust时重复WB表单不再阻断合法动作。未知ID、阶段外字段及已有mask时无理由create仍须处理，见 [WB局部复用](white-balance-v20.md)。
+
+Linear start→end由满强度侧平滑衰减到零，不应把整个过渡区称满强度；Radial半径以长边比例解释，几何相近只提示、不自动证明同区。Tone边界与区外后果见 [Tone](tone-guidance-v20.md)，跨阶段实际mask账目与focus见 [记忆](memory-review-v20.md)。

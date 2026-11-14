@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import photo_source_evidence as module
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = 'dsh-stage-runtime-v13-20261113'
+BUILD = 'dsh-stage-runtime-v20-20261114'
 FOUNDATION_BUILD = module.FOUNDATION_BUILD
 SCHEMA = 'dsh-stage-runtime/v2'
 PROTOCOL = SCHEMA
@@ -42,7 +42,7 @@ def load_resources():
     """No caller-supplied root/path or protocol snapshot can select a profile."""
     resources = read(Path(__file__).with_name('photo_stage_resources.json'))
     if (resources.get('schema') != 'photo-stage-resources/v1'
-            or resources.get('id') != 'stage-resource/v13' or resources.get('build') != BUILD):
+            or resources.get('id') != 'stage-resource/v20' or resources.get('build') != BUILD):
         raise ValueError('Trusted stage resource profile schema/id/build required')
     return resources
 

@@ -1,7 +1,7 @@
 {
   "schema": "photo-stage-resources/v1",
-  "id": "stage-resource/v13",
-  "build": "dsh-stage-runtime-v13-20261113",
+  "id": "stage-resource/v20",
+  "build": "dsh-stage-runtime-v20-20261114",
   "planning": {
     "requests": 50,
     "checkpoints": 4,

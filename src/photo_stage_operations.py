@@ -21,6 +21,7 @@ BANDS = ('red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'
 CURVE_FIELDS = ('highlights', 'lights', 'darks', 'shadows', 'splitShadows', 'splitMid', 'splitHighlights')
 CALIBRATION_FIELDS = tuple(c + f for c in ('red', 'green', 'blue') for f in ('Hue', 'Sat'))
 TONE_IDS = frozenset(['light.' + f for f in TONE_FIELDS] + ['curve.' + f for f in CURVE_FIELDS])
+PRE_TONE_WB_IDS = frozenset(('wb.temp', 'wb.tint'))
 COLOR_IDS = frozenset(['wb.temp', 'wb.tint', 'color.vibrance', 'color.saturation'] +
     ['mixer.' + b + '.' + f for b in BANDS for f in ('hue', 'sat', 'lum')] +
     ['grading.' + b + '.' + f for b in ('shadows', 'midtones', 'highlights') for f in ('hue', 'sat', 'lum')] +
@@ -61,6 +62,8 @@ def _phase(phase):
 
 
 def _allowed_ids(phase):
+    if phase == 'pre_tone_wb':
+        return PRE_TONE_WB_IDS
     return TONE_IDS if phase == 'tone' else COLOR_IDS if phase == 'color' else GLOBAL_IDS
 
 
@@ -95,9 +98,7 @@ def _control_index(controls, dependencies):
     return _rows(controls, 'current controls')
 
 
-def _validate_value(ident, value, phase, controls):
-    if ident not in _allowed_ids(phase):
-        raise ValueError('Control outside ' + phase + ' stage scope: ' + str(ident))
+def _control_range(ident, controls):
     lo, hi = CONTROL_RANGES[ident]
     if controls is not None:
         row = controls.get(ident)
@@ -106,22 +107,41 @@ def _validate_value(ident, value, phase, controls):
         lo, hi = row.get('min'), row.get('max')
         if not _finite(lo) or not _finite(hi) or lo > hi:
             raise ValueError('Missing/invalid current native control range: ' + ident)
+    return lo, hi
+
+
+def _validate_value(ident, value, phase, controls):
+    if ident not in _allowed_ids(phase):
+        raise ValueError('Control outside ' + phase + ' stage scope: ' + str(ident))
+    lo, hi = _control_range(ident, controls)
     _check(value, _number(lo, hi), ident)
 
 
-def _curve_points(points, serialized):
-    _check(points, {'type': 'array', 'items': _point(serialized)}, 'curve.master')
+def _curve_schema(serialized, phase):
+    points = {'type': 'array', 'items': _point(serialized)}
+    if phase == 'tone':
+        points = {'oneOf': [{**points, 'maxItems': 0}, {**points, 'minItems': 2, 'maxItems': 5}]}
+    points['description'] = ('Empty resets to linear; otherwise finite 0..1 points with strictly increasing x' +
+        (' and nondecreasing y, 2–5 points. Endpoints are not fixed or generated.' if phase == 'tone' else '.'))
+    return points
+
+
+def _curve_points(points, serialized, phase='joint'):
+    _check(points, _curve_schema(serialized, phase), 'curve.master')
     xs = [p['x'] if serialized else p[0] for p in points]
     if any(a >= b for a, b in zip(xs, xs[1:])):
         raise ValueError('Curve input x must be strictly increasing')
+    ys = [p['y'] if serialized else p[1] for p in points]
+    if phase == 'tone' and any(a > b for a, b in zip(ys, ys[1:])):
+        raise ValueError('Tone curve output y must be nondecreasing')
 
 
-def _settings_edits(settings):
+def _settings_edits(settings, phase='joint'):
     """Enumerate submitted leaves only; empty dictionaries do not invent edits."""
     result = []
     def visit(path, value):
         if path == 'curve.master':
-            _curve_points(value, True)
+            _curve_points(value, True, phase)
             result.append((path, value))
         elif path in SETTINGS_PATHS:
             result.append((SETTINGS_PATHS[path], value))
@@ -174,13 +194,33 @@ def validate_stage_operation(arguments, current_settings, phase='joint', depende
     Supply current controls (or dependencies['controls']) for source-specific WB
     ranges and current native availability. No current hidden state is reset.
     """
-    _phase(phase)
+    if phase != 'pre_tone_wb':
+        _phase(phase)
     if not isinstance(arguments, dict) or not isinstance(current_settings, dict):
         raise ValueError('Explicit operation arguments and current settings required')
-    if 'phase' in arguments and arguments['phase'] != phase:
-        raise ValueError('Submitted phase differs from authoritative validation phase')
     if current_settings.get('pending') is True:
         raise ValueError('Pending native outcome; reconcile, never replay')
+    if phase == 'pre_tone_wb':
+        if any(key in arguments for key in ('phase', 'settings', 'commands', 'mask_plan')):
+            raise ValueError('pre_tone_wb accepts explicit WB values only, not phase/settings/commands/mask_plan')
+        values = arguments.get('values')
+        if not isinstance(values, dict) or not values or set(values) - PRE_TONE_WB_IDS:
+            raise ValueError('pre_tone_wb requires at least one explicit wb.temp/wb.tint value')
+        wb = current_settings.get('wb')
+        if (not isinstance(wb, dict) or not isinstance(wb.get('mode'), str) or
+                wb.get('mode') not in ('asShot', 'auto', 'daylight', 'cloudy', 'shade', 'tungsten', 'fluorescent', 'flash', 'custom') or
+                wb.get('scale', 'legacy') not in ('kelvin', 'legacy') or
+                any(not _finite(wb.get(key)) for key in ('temp', 'tint'))):
+            raise ValueError('Actual finite WB mode/scale/settings readback required before pre_tone_wb')
+        atlas.finite(current_settings)
+        index = _control_index(controls, dependencies)
+        for ident in PRE_TONE_WB_IDS:
+            _control_range(ident, index)
+        for ident, value in values.items():
+            _validate_value(ident, value, phase, index)
+        return ['wb']
+    if 'phase' in arguments and arguments['phase'] != phase:
+        raise ValueError('Submitted phase differs from authoritative validation phase')
     index = _control_index(controls, dependencies)
     values, settings, commands = arguments.get('values', {}), arguments.get('settings', {}), arguments.get('commands', [])
     if not isinstance(values, dict) or not isinstance(settings, dict) or not isinstance(commands, list):
@@ -222,7 +262,7 @@ def validate_stage_operation(arguments, current_settings, phase='joint', depende
     scalar_settings = copy.deepcopy(settings)
     if wb_metadata:
         scalar_settings['wb'] = {key: value for key, value in wb.items() if key not in wb_metadata}
-    for ident, value in [*values.items(), *_settings_edits(scalar_settings)]:
+    for ident, value in [*values.items(), *_settings_edits(scalar_settings, phase)]:
         if ident == 'curve.master':
             if phase == 'color':
                 raise ValueError('Master curve outside color stage scope')
@@ -244,10 +284,13 @@ def validate_stage_operation(arguments, current_settings, phase='joint', depende
         if ident == 'develop.curve':
             if phase == 'color' or params.get('channel', 'master') != 'master':
                 raise ValueError('Only master point curve is enabled outside color phase')
-            _curve_points(params.get('points'), False)
+            _curve_points(params.get('points'), False, phase)
         elif ident == 'curve.reset':
             if phase == 'color' or params.get('channel') not in ('master', 'parametric'):
                 raise ValueError('Reset must explicitly target master/parametric, never RGB/all')
+        elif ident == 'develop.wbPick':
+            if phase == 'tone':
+                raise ValueError('White balance picker outside tone stage scope')
         elif ident in ('mask.adjust', 'mask.update', 'mask.visible', 'mask.delete', 'mask.select', 'mask.rename'):
             if type(params.get('id')) is not int:
                 raise ValueError('Explicit actual mask ID required')
@@ -304,6 +347,57 @@ def _same(want, actual):
 def _protected(before, after):
     if any(before.get(k) != after.get(k) for k in PROTECTED):
         raise ValueError('Native operation changed protected geometry/optics')
+
+
+def _verify_wb_pick(before, after, result):
+    _check(result, _result_contract('develop.wbPick')['native_schema'], 'develop.wbPick.actual_result')
+    wb = after.get('wb')
+    if (not isinstance(before.get('wb'), dict) or not isinstance(wb, dict) or
+            wb.get('mode') != 'custom' or
+            any(not _finite(wb.get(key)) or wb[key] != result[key] for key in ('temp', 'tint')) or
+            wb.get('scale', 'legacy') not in ('kelvin', 'legacy')):
+        raise ValueError('WB picker result/custom mode/actual scale not read back')
+    # normalize_wb can upgrade old legacy settings to Kelvin. Native omits the
+    # legacy scale; list_controls is static and cannot establish source_info.
+    if before['wb'].get('scale') == 'kelvin' and wb.get('scale') != 'kelvin':
+        raise ValueError('WB picker unexpectedly downgraded the observed Kelvin scale')
+    expected = copy.deepcopy(before)
+    expected['wb'].update(result, mode='custom')
+    if 'scale' in wb:
+        expected['wb']['scale'] = wb['scale']
+    else:
+        expected['wb'].pop('scale', None)
+    if expected != after or not _same(expected, after):
+        raise ValueError('WB picker changed non-WB settings or unrelated WB metadata')
+
+
+def _verify_pre_tone_wb(before, after, values, controls):
+    if not isinstance(after, dict):
+        raise ValueError('Actual settings readback required after pre_tone_wb')
+    atlas.finite(after)
+    left = {key: value for key, value in before.items() if key != 'wb'}
+    right = {key: value for key, value in after.items() if key != 'wb'}
+    if left != right or not _same(left, right):
+        raise ValueError('pre_tone_wb changed non-WB settings')
+    old, wb = before['wb'], after.get('wb')
+    if (not isinstance(wb, dict) or wb.get('mode') != 'custom' or
+            wb.get('scale', 'legacy') not in ('kelvin', 'legacy')):
+        raise ValueError('pre_tone_wb actual custom mode/legal scale not read back')
+    if old.get('scale') == 'kelvin' and wb.get('scale') != 'kelvin':
+        raise ValueError('pre_tone_wb downgraded the qualified Kelvin scale')
+    metadata = lambda item: {k: v for k, v in item.items() if k not in ('mode', 'scale', 'temp', 'tint')}
+    if metadata(old) != metadata(wb) or not _same(metadata(old), metadata(wb)):
+        raise ValueError('pre_tone_wb changed unrelated WB metadata')
+    index = _control_index(controls, None)
+    normalizes_axes = old['mode'] == 'asShot' or (old.get('scale', 'legacy') == 'legacy' and wb.get('scale') == 'kelvin')
+    for key in ('temp', 'tint'):
+        ident = 'wb.' + key
+        _validate_value(ident, wb.get(key), 'pre_tone_wb', index)
+        if ident in values:
+            if wb[key] != values[ident]:
+                raise ValueError('pre_tone_wb absolute value not read back: ' + ident)
+        elif not normalizes_axes and wb[key] != old[key]:
+            raise ValueError('pre_tone_wb changed an unsubmitted WB axis without normalization')
 
 
 def _only_mask_changed(before, after, ident, created=False):
@@ -395,13 +489,26 @@ def apply_stage_operation(backend, base, args, dependencies, trace, checkpoint=N
     """
     if not isinstance(base, dict) or not isinstance(trace, list) or not isinstance(args, dict):
         raise ValueError('Explicit base, args and caller-owned trace required')
-    if any(row.get('status') != 'complete' for row in trace):
+    if any(not isinstance(row, dict) or row.get('status') != 'complete' for row in trace):
         raise ValueError('Pending/unknown trace; retain for reconciliation, never replay')
     phase = getattr(backend, 'stage_phase', 'joint')
     if 'phase' in args and args['phase'] != phase:
         raise ValueError('Submitted phase differs from authoritative backend phase')
     native_controls = backend.controls() if args.get('values') or args.get('settings') else None
     validate_stage_operation(args, base, phase, dependencies, native_controls)
+    if phase == 'pre_tone_wb':
+        if _control_index(native_controls, None) is None:
+            raise ValueError('Actual native controls required before pre_tone_wb execution')
+        record = {'kind': 'stage_operation', 'phase': phase, 'status': 'pending'}
+        trace.append(record)
+        if checkpoint:
+            checkpoint()
+        actual = apply_strict(backend, base, args, dependencies, trace, checkpoint)
+        _verify_pre_tone_wb(base, actual, args['values'], native_controls)
+        record.update(status='complete', settings_readback=copy.deepcopy(actual))
+        if checkpoint:
+            checkpoint()
+        return actual
     if 'mask_plan' not in args:
         # Strict execution preserves ordinary command/result contracts and uses
         # Native.apply for the existing exact-restore/settings/readback path.
@@ -409,6 +516,7 @@ def apply_stage_operation(backend, base, args, dependencies, trace, checkpoint=N
         trace.append(record)
         if checkpoint:
             checkpoint()
+        command_trace_start = len(trace)
         actual = apply_strict(backend, base, args, dependencies, trace, checkpoint)
         if args.get('commands'):
             # Selection is outside DevelopSettings; verify the actual control
@@ -419,7 +527,8 @@ def apply_stage_operation(backend, base, args, dependencies, trace, checkpoint=N
                     if entry.get('control_state_readback', {}).get('activeMask') != command['params']['id']:
                         raise ValueError('Explicit mask selection was not read back')
             expected = copy.deepcopy(base)
-            for command in args['commands']:
+            command_records = [entry for entry in trace[command_trace_start:] if 'command' in entry]
+            for position, command in enumerate(args['commands']):
                 ident, params = command['id'], command.get('params', {})
                 if ident.startswith('mask.'):
                     target = _observed_mask(expected, params['id'])
@@ -436,11 +545,24 @@ def apply_stage_operation(backend, base, args, dependencies, trace, checkpoint=N
                     # Selection changes control state, not DevelopSettings.
                 elif ident == 'develop.curve':
                     expected['curve']['master'] = [dict(zip(('x', 'y'), point)) for point in params['points']]
-                elif params['channel'] == 'master':
-                    expected['curve']['master'] = []
-                else:
-                    expected['curve'].update(highlights=0, lights=0, darks=0, shadows=0,
-                        split_shadows=25, split_mid=50, split_highlights=75)
+                elif ident == 'develop.wbPick':
+                    if position >= len(command_records) or command_records[position].get('command') != command:
+                        raise ValueError('WB picker actual command/result trace missing')
+                    entry = command_records[position]
+                    try:
+                        _verify_wb_pick(entry['before_settings'], entry['settings_readback'], entry['result'])
+                    except (KeyError, ValueError):
+                        entry['status'] = 'pending'
+                        if checkpoint:
+                            checkpoint()
+                        raise
+                    expected['wb'] = copy.deepcopy(entry['settings_readback']['wb'])
+                elif ident == 'curve.reset':
+                    if params['channel'] == 'master':
+                        expected['curve']['master'] = []
+                    else:
+                        expected['curve'].update(highlights=0, lights=0, darks=0, shadows=0,
+                            split_shadows=25, split_mid=50, split_highlights=75)
             if not _same(expected, actual):
                 raise ValueError('Atomic command fields or preserved state not read back')
         record.update(status='complete', settings_readback=copy.deepcopy(actual))
@@ -448,7 +570,9 @@ def apply_stage_operation(backend, base, args, dependencies, trace, checkpoint=N
             checkpoint()
         return actual
     plan = copy.deepcopy(args['mask_plan'])
-    transaction = {'kind': 'mask_plan', 'plan': copy.deepcopy(plan), 'phase': phase, 'status': 'pending'}
+    from photo_working_context import geometry_proximity
+    transaction = {'kind': 'mask_plan', 'plan': copy.deepcopy(plan), 'phase': phase, 'status': 'pending',
+                   'geometry_warnings': geometry_proximity(base, plan)}
     trace.append(transaction)
     if checkpoint:
         checkpoint()

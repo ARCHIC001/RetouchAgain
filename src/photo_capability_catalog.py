@@ -45,7 +45,7 @@ _CONTROL_GROUPS = {
 STATIC_CONTROL_IDS = frozenset(x for group in _CONTROL_GROUPS.values() for x in group)
 POINT_FIELDS = ('hueShift', 'satShift', 'lumShift', 'variance', 'range', 'hueRange', 'satRange', 'lumRange')
 COMMAND_IDS = (
-    'develop.curve', 'curve.reset', 'pointColor.pick', 'pointColor.delete',
+    'develop.curve', 'curve.reset', 'develop.wbPick', 'pointColor.pick', 'pointColor.delete',
     'mask.add', 'mask.addComponent', 'mask.brushStroke', 'mask.update',
     'mask.sampleColor', 'mask.objectPoint', 'mask.refineDetail', 'mask.refine',
     'mask.adjust', 'mask.select', 'mask.delete', 'mask.deleteAll', 'mask.rename',
@@ -85,6 +85,8 @@ def module_for(control_id: str) -> str:
             return module
     if re.fullmatch(r'pointColor\.[0-7]\.(' + '|'.join(POINT_FIELDS) + ')', control_id):
         return 'mixer_point'
+    if control_id == 'develop.wbPick':
+        return 'wb'
     if control_id in COMMAND_IDS:
         return 'masks' if control_id.startswith('mask.') else ('curves' if control_id in ('develop.curve', 'curve.reset') else 'mixer_point')
     raise ValueError('Outside P0 whitelist: ' + control_id)
@@ -180,6 +182,8 @@ def _command_schema(ident):
     table = {
         'develop.curve': _object({'channel': _enum(('master', 'rgb', 'red', 'green', 'blue')), 'points': _array(_point())}, ('points',), description='Empty resets to linear; otherwise input x must be strictly increasing. Output y need not be monotonic.'),
         'curve.reset': _object({'channel': _enum(('all', 'point', 'parametric', 'master', 'rgb', 'luma', 'red', 'green', 'blue'))}),
+        'develop.wbPick': _object({'x': _number(0, 1), 'y': _number(0, 1)}, ('x', 'y'),
+            description='Finite normalized full oriented SOURCE coordinates, x right/y down. Samples a clamped 5x5 neighbourhood of SourceLevel::Thumb, NOT full-resolution rendered pixels. Caller must ground a physical neutral point; map ROI coordinates back to the full source, never use author/grid-centre coordinates by default.'),
         'pointColor.pick': _object({'x': _number(0, 1), 'y': _number(0, 1)}, ('x', 'y')),
         'pointColor.delete': _object({'index': _REQUIRED_INDEX}, ('index',)),
         'mask.brushStroke': _object({**target, 'points': _array(_point(), 1), 'size': _RADIUS, **{k: _number(0, 100) for k in ('feather', 'flow', 'density')}, **{k: _BOOL for k in ('erase', 'autoMask', 'connect')}, 'pressure': {'anyOf': [_array(_number(0, 1)), {'type': 'null'}]}}, ('points',)),
@@ -200,7 +204,8 @@ def _command_schema(ident):
 
 _EXAMPLES = {
     'develop.curve': {'channel': 'master', 'points': [[0, 0], [0.5, 0.55], [1, 1]]},
-    'curve.reset': {'channel': 'point'}, 'pointColor.pick': {'x': 0.5, 'y': 0.5},
+    'curve.reset': {'channel': 'point'}, 'develop.wbPick': {'x': 0.4, 'y': 0.6},
+    'pointColor.pick': {'x': 0.5, 'y': 0.5},
     'pointColor.delete': {'index': 0}, 'mask.add': {'kind': 'linear', 'start': [0.5, 0.2], 'end': [0.5, 0.7]},
     'mask.addComponent': {'id': 7, 'kind': 'radial', 'op': 'subtract', 'center': [0.5, 0.5], 'rx': 0.2, 'ry': 0.1},
     'mask.brushStroke': {'id': 7, 'points': [[0.4, 0.4], [0.5, 0.5]], 'size': 0.03},
@@ -269,6 +274,8 @@ def _result_contract(ident):
         payload = {'type': 'null'}
     elif ident == 'curve.reset':
         payload = _object({'channel': _STRING}, ('channel',))
+    elif ident == 'develop.wbPick':
+        payload = _object({'temp': _number(), 'tint': _number()}, ('temp', 'tint'))
     elif ident == 'pointColor.pick':
         payload = _object({'index': _REQUIRED_INDEX, 'lum': _number(), 'chroma': _number(), 'hue': _number(0, 360)}, ('index', 'lum', 'chroma', 'hue'))
     elif ident == 'pointColor.delete':
@@ -290,15 +297,16 @@ def _result_contract(ident):
                  'always for completed creation' if creates_id else 'not a new mask')
     return {
         'native_schema': payload, 'may_create_mask_id': creates_id,
-        'handoff_required': ident in ('pointColor.pick', 'mask.add', 'mask.addComponent', 'mask.duplicate', 'mask.sampleColor', 'mask.objectPoint', 'mask.refineDetail'),
+        'handoff_required': ident in ('develop.wbPick', 'pointColor.pick', 'mask.add', 'mask.addComponent', 'mask.duplicate', 'mask.sampleColor', 'mask.objectPoint', 'mask.refineDetail'),
         'handoff_condition': ('when it creates a mask or appends a brush component' if ident == 'mask.brushStroke' else
                               'when action is duplicate (new component index)' if ident == 'mask.component' else
-                              'result/readback required after this command' if ident in ('pointColor.pick', 'mask.add', 'mask.addComponent', 'mask.duplicate', 'mask.sampleColor', 'mask.objectPoint', 'mask.refineDetail') else
+                              'result/readback required after this command' if ident in ('develop.wbPick', 'pointColor.pick', 'mask.add', 'mask.addComponent', 'mask.duplicate', 'mask.sampleColor', 'mask.objectPoint', 'mask.refineDetail') else
                               'deterministic changes on observed objects may continue within the validated batch'),
         'new_mask_id': {'native_field': 'activeMask', 'runner_field': 'maskId', 'predict': False,
                         'creation_condition': condition,
                         'verification': 'Only for a completed NEW mask: require actual returned activeMask is a new ID in fresh masks. Pending-only has no ID; never derive from max/next_mask_id. An explicit existing-mask brushStroke does NOT create/select a mask; retain its observed target even if returned activeMask is null or different.'} if creates_id else None,
-        'readback': 'Use command result AND fresh get_develop plus observed selection. pending=true/started=true is not completion. Existing IDs and point indices must be observed, not inferred.',
+        'readback': ('Require exact returned temp/tint in fresh get_develop.wb, mode=custom and the actual normalize_wb scale (kelvin or legacy omitted by serde). Preserve all other base settings, masks and geometry. Sampling is oriented SourceLevel::Thumb 5x5, not full-resolution; unresolved outcome stays pending, never replay.' if ident == 'develop.wbPick' else
+                     'Use command result AND fresh get_develop plus observed selection. pending=true/started=true is not completion. Existing IDs and point indices must be observed, not inferred.'),
     }
 
 
@@ -387,11 +395,13 @@ def build_catalog(controls: list, commands: list, dependencies: dict) -> dict:
             prereqs.append('Native may inherit previous per-kind local adjustments; read adjust back. Host reset/neutralization must be explicit and traced, never assume zero.')
         if ident == 'pointColor.delete':
             prereqs.append('existing zero-based point_colors index; deletion shifts later indices')
+        if ident == 'develop.wbPick':
+            prereqs.append('Caller-grounded physical neutral SOURCE point; optional, not a guaranteed neutral answer. End batch for actual {temp,tint} and fresh custom-mode/normalized-scale readback; preserve every non-WB setting. Legacy scale is omitted in native JSON; do not label relative-source values Kelvin or full-resolution sampling.')
         if ident == 'pointColor.pick':
             prereqs.append('fewer than 8 point_colors samples')
         if ident in ('mask.objectPoint', 'mask.refineDetail'):
             prereqs.append('segment.model.status: available, locally installed, idle, no remote; object/prompt component required')
-        file = 'curves.rs' if ident == 'curve.reset' else 'develop.rs' if ident == 'develop.curve' else 'color.rs' if ident.startswith('pointColor.') else 'masks.rs'
+        file = 'curves.rs' if ident == 'curve.reset' else 'develop.rs' if ident in ('develop.curve', 'develop.wbPick') else 'color.rs' if ident.startswith('pointColor.') else 'masks.rs'
         row = {
             'id': ident, 'kind': 'command', 'module': module, 'label': (native or {}).get('label', ident),
             'aliases': _aliases(ident, module), 'schema': _command_schema(ident), 'result_contract': _result_contract(ident),
@@ -576,6 +586,9 @@ def validate_commands(commands: list, current_settings: dict, dependencies: dict
                 raise ValueError('Curve input x must be strictly increasing; do not silently sort/deduplicate')
             continue
         if ident == 'curve.reset':
+            continue
+        if ident == 'develop.wbPick':
+            handoff()
             continue
         if ident == 'pointColor.pick':
             if len(samples) >= 8:

@@ -232,6 +232,9 @@ def validate_transition(state, reason, observation_id, selected_version=None, *,
     if version != observation['version']:
         raise ValueError('Selected version must be the version actually observed')
     full_observation = checkpoint_evidence(state, observation, phase)
+    if phase == 'G1':
+        from photo_pre_tone import validate_exit
+        validate_exit(state, observation, full_observation)
     if phase == 'joint':
         export = state.get('export')
         if (not isinstance(export, dict) or export.get('version') != version
@@ -247,8 +250,10 @@ def validate_transition(state, reason, observation_id, selected_version=None, *,
         if (workflow['accepted_versions']['joint'] != version or state.get('status') != 'complete'
                 or state.get('selected_version') != version):
             raise ValueError('Worker must successfully confirm this actual JPEG before completing workflow')
+    ancestors = _version_ancestry(state, version)
     outstanding = [d['id'] for d in workflow['review_debts']
-                   if d.get('status', 'pending') == 'pending' and d.get('due_phase') == phase]
+                   if d.get('status', 'pending') == 'pending' and d.get('version') in ancestors
+                   and PHASES.index(d['due_phase']) <= PHASES.index(phase)]
     draft = copy.deepcopy(state)
     if bank_delta is not None and not isinstance(bank_delta, list):
         raise ValueError('bank_delta must be a list')
@@ -269,20 +274,23 @@ def validate_transition(state, reason, observation_id, selected_version=None, *,
         event['outstanding_review_debts'] = outstanding
     if color_reassessment is not None:
         event['color_reassessment' if phase == 'G2' else 'early_color_reassessment_plan'] = public_copy(color_reassessment)
+    if phase == 'G1':
+        assessment = next((row for row in reversed(state.get('tone_assessments', []))
+            if row.get('phase') == 'G1' and row.get('settings_version') == version), None)
+        if assessment:
+            event['tone_assessment'] = public_copy(assessment)
+    if phase == 'G2':
+        assessment = next((row for row in reversed(state.get('wb_assessments', []))
+            if row.get('phase') == 'G2' and row.get('settings_version') == version), None)
+        if assessment:
+            event['wb_assessment'] = public_copy(assessment)
     if phase in CHECKPOINTS:
         event.update(source_observation_id=observation_id, full_observation_id=full_observation['id'])
     if phase in CHECKPOINTS:
         result['checkpoints'][phase] = copy.deepcopy(event)
     if phase in ('tone', 'color', 'joint'):
         result['accepted_versions'][phase] = version
-        ancestors = _version_ancestry(state, version)
-        for debt in result['review_debts']:
-            require_version(state, debt.get('version'))
-            if debt.get('status', 'pending') == 'pending' and debt['version'] not in ancestors:
-                # Branch selection removes applicability, not the unreviewed audit.
-                debt.update(status='not_applicable_selected_branch',
-                            selection_event_id=event['id'], selected_version=version,
-                            selection_observation_id=observation_id)
+        _reconcile_debts(state, result['review_debts'], version, event['id'], observation_id)
     result['events'].append(event)
     return {'from_phase': phase, 'to_phase': next_phase, 'expected_revision': workflow['revision'],
             'workflow': result, 'proposal_bank': copy.deepcopy(draft.get('proposal_bank'))}
@@ -342,6 +350,47 @@ def advance_workflow(state, reason, observation_id, selected_version=None, **opt
     return copy.deepcopy(state['workflow'])
 
 
+def _reconcile_debts(state, debts, version, selection_event_id, observation_id):
+    ancestors = _version_ancestry(state, version)
+    changes = []
+    for debt in debts:
+        require_version(state, debt.get('version'))
+        status = debt.get('status', 'pending')
+        if status == 'pending' and debt['version'] not in ancestors:
+            debt.update(status='not_applicable_selected_branch', applicability_previous_status='pending',
+                        selection_event_id=selection_event_id, selected_version=version,
+                        selection_observation_id=observation_id)
+            changes.append({'id': debt['id'], 'from_status': status, 'to_status': debt['status']})
+        elif status == 'not_applicable_selected_branch' and debt['version'] in ancestors:
+            restored = debt.pop('applicability_previous_status', 'pending')
+            if restored != 'pending':
+                raise ValueError('Only a pending debt may be restored from branch inapplicability')
+            debt['status'] = restored
+            debt['applicability_restored'] = {'selection_event_id': selection_event_id,
+                'selected_version': version, 'observation_id': observation_id}
+            changes.append({'id': debt['id'], 'from_status': status, 'to_status': restored})
+    return changes
+
+
+def reconcile_debt_applicability(state, version, selection_event_id=None, observation_id=None):
+    """Reversible branch applicability; reviewed decisions are never reset or invented."""
+    require_ready(state)
+    workflow = copy.deepcopy(_workflow(state))
+    if selection_event_id is not None and (not isinstance(selection_event_id, str) or not selection_event_id.strip()):
+        raise ValueError('Selection event ID must be a nonempty string')
+    if observation_id is not None and observation_for(state, observation_id)['version'] != version:
+        raise ValueError('Selection observation must describe the selected version')
+    event_id = selection_event_id or 'workflow:' + str(workflow['revision'] + 1)
+    changes = _reconcile_debts(state, workflow['review_debts'], version, event_id, observation_id)
+    if changes:
+        workflow['revision'] += 1
+        workflow['events'].append({'id': 'workflow:' + str(workflow['revision']),
+            'kind': 'review_debt_applicability', 'selected_version': version,
+            'selection_event_id': event_id, 'observation_id': observation_id, 'changes': changes})
+        state['workflow'] = workflow
+    return copy.deepcopy(workflow['review_debts'])
+
+
 def add_review_debt(state, debt):
     """Record a host-bound cross-stage consequence; never invent a review."""
     require_ready(state)
@@ -353,6 +402,18 @@ def add_review_debt(state, debt):
             or debt.get('status', 'pending') != 'pending'):
         raise ValueError('Debt needs an ID, known due checkpoint and public reason')
     require_version(state, debt.get('version'))
+    if 'schema' in debt:
+        if debt['schema'] != 'photo-review-debt/v2':
+            raise ValueError('Unknown review debt schema')
+        from photo_review_anchors import validate_debt_focus
+        focus = validate_debt_focus(debt.get('focus'), state)
+        if any(item['operation_id'] != debt.get('operation_id') for item in focus):
+            raise ValueError('Debt focus must bind this actual debt operation')
+        ancestors = _version_ancestry(state, debt['version'])
+        if any(item['source']['settings_version'] not in ancestors for item in focus):
+            raise ValueError('Debt focus must come from the operation branch, not an unrelated source')
+    elif 'focus' in debt:
+        raise ValueError('Focus-bearing debts must explicitly use photo-review-debt/v2')
     if any(row['id'] == debt['id'] for row in workflow['review_debts']):
         raise ValueError('Duplicate review debt ID')
     if PHASES.index(debt['due_phase']) < PHASES.index(workflow['phase']):
@@ -367,32 +428,76 @@ def add_review_debt(state, debt):
 
 
 def resolve_review_debts(state, updates, observation_id):
-    """Explicit model reviews/tradeoffs, with the actual observed descendant version."""
+    """Review each focus at its actual later checkpoint; spawn is not photo repair.
+
+    Bank changes and every debt update share one detached transaction. Legacy
+    status updates are accepted only for already legacy, focus-free debt records.
+    """
     require_ready(state)
-    workflow = copy.deepcopy(_workflow(state))
-    observation = observation_for(state, observation_id, reviewed=True)
-    checkpoint_evidence(state, observation, workflow['phase'])
     if not isinstance(updates, list):
         raise ValueError('Debt updates must be a list')
-    ancestors = _version_ancestry(state, observation['version'])
+    draft = copy.deepcopy(state)
+    workflow = _workflow(draft)
+    observation = observation_for(draft, observation_id, reviewed=True)
+    phase = workflow['phase']
+    if updates:
+        require_action(phase in ('G2', 'G3', 'G4'), 'debt_checkpoint_required',
+            'Debt review requires an actual G2/G3/G4 color checkpoint', 'review_debt_updates')
+        checkpoint_evidence(draft, observation, phase)
+        spec = observation.get('view_spec') or {}
+        meta = observation.get('stage_observation') or {}
+        require_action(observation['version'] == state['current']
+            and observation.get('comparison_mode', spec.get('comparison_mode')) == 'target'
+            and meta.get('view_mode') == 'color' and not observation.get('batch_of') and not spec.get('batch_of'),
+            'debt_current_target_required', 'Debt checks must use the actual current color target comparison',
+            'source_observation_id')
+    ancestors = _version_ancestry(draft, observation['version'])
     seen = set()
     for update in updates:
         if not isinstance(update, dict):
             raise ValueError('Debt update must be an object')
         ident = update.get('id')
         debt = next((row for row in workflow['review_debts'] if row['id'] == ident), None)
-        if (debt is None or ident in seen or debt['status'] != 'pending'
-                or debt['version'] not in ancestors or update.get('status') not in ('resolved', 'accepted_tradeoff')
+        if (debt is None or ident in seen or debt['version'] not in ancestors
                 or not isinstance(update.get('reason'), str) or not update['reason'].strip()):
-            raise ValueError('Invalid, stale, duplicate or unsupported debt resolution')
-        if PHASES.index(workflow['phase']) < PHASES.index(debt['due_phase']):
+            raise ValueError('Invalid, stale or duplicate debt resolution')
+        if PHASES.index(phase) < PHASES.index(debt['due_phase']):
             raise ValueError('Debt requires its designated later color checkpoint')
         seen.add(ident)
-        debt.update(status=update['status'], resolution_reason=update['reason'],
-                    observation_id=observation_id, reviewed_version=observation['version'])
-    if updates:
+        if debt.get('schema') == 'photo-review-debt/v2':
+            from photo_review_anchors import validate_debt_focus, validate_debt_update
+            validate_debt_focus(debt.get('focus'), draft)
+            checks = validate_debt_update(update, debt, observation)
+            # An exact retry is a no-op, including its stable Joint diagnostic.
+            if debt['status'] != 'pending':
+                if (debt.get('review_update') == update and debt.get('observation_id') == observation_id
+                        and debt.get('reviewed_version') == observation['version']):
+                    continue
+                raise ValueError('Already reviewed v2 debt cannot be silently rewritten')
+            resolution = update['resolution']
+            if resolution == 'spawn_joint_task':
+                from photo_proposal_bank import spawn_joint_diagnostic
+                debt['joint_issue_id'] = spawn_joint_diagnostic(draft, debt, update['joint_diagnosis'],
+                    observation_id, anchors=debt['focus'], existing_issue_id=update.get('existing_joint_issue_id'))
+            debt.update(status={'no_regression': 'resolved', 'minor_acceptable': 'accepted_tradeoff',
+                                'spawn_joint_task': 'reviewed_joint_task'}[resolution],
+                        resolution=resolution, checks=checks, review_update=public_copy(update),
+                        actual_phase=phase, review_complete=True, photographic_fix_claimed=False)
+        else:
+            if 'schema' in debt or 'focus' in debt or debt['status'] != 'pending' or update.get('status') not in ('resolved', 'accepted_tradeoff'):
+                raise ValueError('Only legacy debts accept legacy status resolution')
+            if set(update) != {'id', 'status', 'reason'}:
+                raise ValueError('Legacy debt update requires id/status/reason only')
+            debt['status'] = update['status']
+        debt.update(resolution_reason=update['reason'], observation_id=observation_id,
+                    reviewed_version=observation['version'], actual_phase=phase)
+    changed = workflow != state['workflow']
+    if changed:
         workflow['revision'] += 1
         workflow['events'].append({'id': 'workflow:' + str(workflow['revision']), 'kind': 'review_debts_resolved',
-                                   'observation_id': observation_id, 'updates': public_copy(updates)})
+            'observation_id': observation_id, 'actual_phase': phase, 'reviewed_version': observation['version'],
+            'updates': public_copy(updates)})
         state['workflow'] = workflow
+        if 'proposal_bank' in draft:
+            state['proposal_bank'] = draft['proposal_bank']
     return copy.deepcopy(workflow['review_debts'])

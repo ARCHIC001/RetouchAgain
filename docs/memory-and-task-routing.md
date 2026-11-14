@@ -66,3 +66,14 @@
 - `src/photo_stage_tasks.py`：任务注册、默认路线与软依赖解析。
 - `src/photo_phase_scheduler.py`：阶段调度与复核债务管理。
 - `src/dsh_stage_worker.py`：复合提交统一入口。
+
+
+---
+
+## v20追加：typed依赖、focus与真实引用
+
+> 发布派生版/非历史原稿。原有任务组织叙述不改写。
+
+新增 [记忆与区域复核机制](memory-review-v20.md)：soft／hard、disposition／effect分离；skip不冒resolved，waiver绑定真实处置并沿适用祖先链继承；全阶段实际mask清单与selected baseline；host-bound anchors及逐focus债务；spawn仅建无参数Joint诊断。
+
+完整group ID不再反复加前缀，修订遗漏旧组不自动retire。可选锚点无效保原文降unknown；不合格附带债务批次保留not_adopted且原债务不变，不阻其他合法动作。当前版唯一operation→expectation映射可规范化，已复核后果的冗余声明不覆旧判断。原始历史不删，也不自动重放旧数值。

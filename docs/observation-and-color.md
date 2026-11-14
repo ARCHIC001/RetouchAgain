@@ -93,3 +93,14 @@ Agent 在不同回合面对两类核心对比：
 - `src/photo_resize_contract.py`、`src/photo_opacity_contract.py`：显示缩放与透明区合成。
 - `src/photo_stage_observation.py`：灰度派生、阶段观察图生成与 4×4 网格元数据。
 - `src/dsh_photo_color.py`：本地 CIELAB D65 色彩统计。
+
+
+---
+
+## v20追加：观察归因与证据边界
+
+> 发布派生版/非历史原稿。以下补充不改动既有图像管线说明。
+
+G1彩色 [Tone归因](tone-guidance-v20.md) 区分structure／chroma／uncertain；统一linear-Y灰度是可重复派生，不是绝对感知亮度无损。G2 [WB视觉基准](white-balance-v20.md)允许没有可靠中性参考与没有WB任务，不将有意氛围自动中性化。
+
+[区域focus](memory-review-v20.md)按每张实际视图独立绑定grid／ROI，不声明相同格号即配准。可选锚点失败不猜role／cell。G4观察来源必须是实际JPEG，但模型收到的仍是观察契约规定尺度的派生图，不因母版全分辨率就称其已全分辨率看图。

@@ -11,15 +11,15 @@ from photo_stage_operations import (TONE_IDS, COLOR_IDS, EFFECT_IDS, SETTINGS_PA
 
 BRANCHES = ('tone', 'color', 'joint')
 GROUP_STATUSES = ('ready', 'needs_reassessment', 'waiting_dependency', 'later_phase',
-                  'current', 'awaiting_effect', 'resolved', 'retired',
+                  'current', 'awaiting_effect', 'resolved', 'skipped', 'retired',
                   'off_selected_branch', 'unresolved')
 # Each row is (step, canonical module, public label). Not a mandatory menu walk.
 TASK_REGISTRY = {
     'tone': (
-        ('exposure', 'light', '整体曝光'),
-        ('contrast', 'light', '整体对比'),
-        ('highlights_shadows', 'light', '高光与阴影'),
         ('whites_blacks', 'light', '白场与黑场'),
+        ('exposure', 'light', '整体曝光'),
+        ('highlights_shadows', 'light', '高光与阴影'),
+        ('contrast', 'light', '整体对比'),
         ('master_curve', 'curves', '总体点曲线'),
         ('parametric_curve', 'curves', '参数曲线'),
         ('local_tone', 'masks', '局部影调'),
@@ -68,6 +68,8 @@ def classify_control(ident, *, local=False):
             return 'color', 'masks', 'local_wb'
         return None
     ident = SETTINGS_PATHS.get(ident, ident)
+    if ident == 'develop.wbPick':
+        return 'color', 'wb', 'wb'
     if ident == 'curve.master':
         return 'tone', 'curves', 'master_curve'
     if ident in TONE_IDS:
@@ -134,7 +136,7 @@ def parse_controls(proposal, source_path='proposed_controls', branch=None):
                 else:
                     visit(item, itempath)
         elif isinstance(value, dict):
-            if 'control_id' in value or (isinstance(value.get('id'), str) and value['id'] in ALL_IDS):
+            if 'control_id' in value or (isinstance(value.get('id'), str) and value['id'] in ALL_IDS | {'develop.wbPick'}):
                 emit(path, value, value.get('control_id', value.get('id')))
                 return
             if 'name' in value and 'arguments' in value:
@@ -206,6 +208,12 @@ def group_sort_key(group):
     return (BRANCHES.index(group['branch']), order, -group.get('priority', 0), group['id'])
 
 
+def explicit_group_id(issue_id, group_id):
+    """Accept a short ID or an already qualified ID without growing its prefix."""
+    prefix = issue_id + '::'
+    return group_id if group_id.startswith(prefix) else prefix + group_id
+
+
 def derive_groups(issue):
     """Derive stable path-based groups; caller merges snapshots, never overwrites originals."""
     groups = []
@@ -233,8 +241,9 @@ def derive_groups(issue):
                         spec.get('step', first[2])): fragments}
         for (branch, module, step), parts in buckets.items():
             suffix = branch + '/' + module + '/' + step
-            ident = issue['id'] + '::' + (explicit if explicit and len(buckets) == 1 else
-                                         (explicit + '/' if explicit else '') + suffix)
+            ident = explicit_group_id(issue['id'], explicit) if explicit else issue['id'] + '::' + suffix
+            if explicit and len(buckets) > 1:
+                ident += '/' + suffix
             row = {'id': ident, 'group_id': ident, 'issue_id': issue['id'], 'branch': branch,
                    'module': module, 'step': step, 'proposed_controls': copy.deepcopy(parts),
                    'shared_context_ref': {'issue_id': issue['id'], 'source_path': path,

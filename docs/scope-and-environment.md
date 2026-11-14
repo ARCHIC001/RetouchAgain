@@ -44,3 +44,14 @@ python -I -B -X utf8 src/check_photo_stage_continuation.py
 3. **跑通离线测试**：运行 5 个 `check_*.py` 脚本，确认状态机与契约逻辑通过。
 4. **对接运行时与后端**：接入 DSH 运行时与原生修图后端，验证控件目录、设置读回与全尺寸渲染输出。
 5. **准备输入并运行**：配置好目标/源图基线与模型 API 授权后，通过 `src/dsh_stage_run.mjs` 启动调色闭环。
+
+
+---
+
+## v20追加：新增模块与测试资格
+
+> 发布派生版/非历史原稿。以下为新增说明，不替换原有环境文案。
+
+新增WB、Tone、pre-tone资格、working context、review anchors及source close-proof模块。已列入的WB／Tone／working-context／anchors合成检查纳入发布验证；阶段worker的发布派生测试仅保留独立synthetic用例，不复制现场答卷补齐。完整入口以 [publication-scope.json](../publication-scope.json) 为准。
+
+克隆仍不继承原机mtime、教材、输入资格、Native／DSH依赖或收费授权。参考 [v20使用前提](v20-update-and-usage.md)，不要用合成测试通过冒摄影质量或原机恢复资格。照片例外仍仅为已登记三文件，实验结果与第三方安装不发布。

@@ -9,10 +9,12 @@ import copy
 from photo_phase_scheduler import (PHASES, observation_for, public_copy,
                                    require_ready, require_version)
 from photo_stage_rejections import ActionRejected
-from photo_stage_tasks import (GROUP_STATUSES, derive_groups, group_sort_key,
-                               parse_controls, registry)
+from photo_stage_tasks import (GROUP_STATUSES, derive_groups, explicit_group_id,
+                               group_sort_key, parse_controls, registry)
 
 BRANCHES = ('tone', 'color', 'joint')
+TERMINAL = ('resolved', 'skipped', 'retired')
+EFFECT_OUTCOMES = ('improved', 'worse', 'mixed', 'uncertain', 'supported', 'contradicted', 'not_visible')
 OPS = ('add', 'keep', 'revise', 'retire', 'defer')
 FIELDS = {'branch', 'diagnosis', 'priority', 'proposed_controls', 'evidence', 'scope',
           'target_change', 'protected', 'risks', 'dependencies', 'rationale', 'reason',
@@ -89,6 +91,23 @@ def _ancestry(state, base):
     return result
 
 
+def _dependency_spec(dep):
+    if isinstance(dep, str) and dep.strip():
+        return {'ref': dep, 'kind': 'soft', 'requirement': 'disposition'}
+    if (not isinstance(dep, dict) or set(dep) - {'group_id', 'issue_id', 'kind', 'requirement', 'operation_id'}
+            or len(set(dep) & {'group_id', 'issue_id'}) != 1
+            or dep.get('kind') not in ('soft', 'hard')
+            or dep.get('requirement') not in ('disposition', 'effect')):
+        raise ActionRejected('invalid_dependency', 'Dependency needs one group_id/issue_id, kind soft|hard and requirement disposition|effect', 'dependencies')
+    ref = dep.get('group_id', dep.get('issue_id'))
+    _id(ref, 'dependency target ID')
+    if 'operation_id' in dep:
+        _id(dep['operation_id'], 'dependency operation ID')
+        if dep['requirement'] != 'effect':
+            raise ActionRejected('invalid_dependency', 'operation_id only qualifies an effect dependency', 'dependencies.operation_id')
+    return {**dep, 'ref': ref}
+
+
 def _validate_changes(changes):
     if 'branch' in changes and changes['branch'] not in BRANCHES:
         raise ValueError('Unknown proposal branch')
@@ -99,6 +118,12 @@ def _validate_changes(changes):
         raise ValueError('priority must be a finite number')
     if 'proposed_controls' in changes and not isinstance(changes['proposed_controls'], (dict, list)):
         raise ValueError('proposed_controls must be an explicit object or list')
+    if 'dependencies' in changes:
+        deps = changes['dependencies']
+        if not isinstance(deps, (str, list)):
+            raise ActionRejected('invalid_dependency', 'dependencies must be a string or list', 'dependencies')
+        for dep in [deps] if isinstance(deps, str) else deps:
+            _dependency_spec(dep)
     override = changes.get('reorder_override')
     if override is not None:
         if (not isinstance(override, dict) or not isinstance(override.get('reason'), str)
@@ -122,27 +147,34 @@ def _refresh_groups(row, op, changed):
     old = _ensure_groups(row)
     if op == 'revise' and changed.intersection({'proposed_controls', 'groups'}):
         derived = derive_groups({**row, 'revision': row['revision'] + 1})
-        live = set()
         for group in derived:
-            gid = group['id']; live.add(gid)
+            gid = group['id']
             prior = old.get(gid)
             if prior:
                 explicit = next((spec for spec in row.get('groups', [])
-                    if isinstance(spec, dict) and gid == row['id'] + '::' + str(spec.get('group_id'))), {})
+                    if isinstance(spec, dict) and isinstance(spec.get('group_id'), str)
+                    and gid == explicit_group_id(row['id'], spec['group_id'])), {})
                 reopened = (prior.get('source_proposal') != group.get('source_proposal') or
                             explicit.get('status') in ('ready', 'current', 'needs_reassessment'))
-                group = {**prior, **group, 'records': prior['records'], 'operations': prior.get('operations', [])}
-                if prior['status'] == 'resolved' and not reopened:
-                    group['status'] = 'resolved'
+                if prior['status'] == 'retired':
+                    if reopened:
+                        raise ActionRejected('retired_bank_group',
+                            'Retired group is immutable; add a new explicit group ID instead', 'bank_delta.groups')
+                    continue
+                group = {**prior, 'unresolved': False, **group,
+                         'records': prior['records'], 'operations': prior.get('operations', [])}
+                if prior['status'] in TERMINAL and not reopened:
+                    group['status'] = prior['status']
             old[gid] = group
-        for gid in old.keys() - live:
-            old[gid].update(status='retired', wait_reason='Proposal revised; original group and history retained')
+        # Omission is not an explicit retirement: retain each original group/ID.
     for group in old.values():
+        if group['status'] == 'retired':
+            continue
         for field in ('priority', 'dependencies', 'reorder_override', 'selection_reason'):
             if field in changed:
                 group[field] = copy.deepcopy(row[field])
-        if group['status'] == 'retired' and op != 'retire':
-            continue
+        if op == 'revise' and group['status'] == 'skipped':
+            group.update(status='unresolved' if group.get('unresolved') else 'ready', wait_reason=None)
         group.update(base_version=row['base_version'], observation_id=row['observation_id'], observation=row['observation_id'])
         if op in ('keep', 'revise'):
             group['reassessed_for_version'] = row['base_version']
@@ -154,7 +186,7 @@ def _refresh_groups(row, op, changed):
             group.update(status='retired', wait_reason='Issue explicitly retired')
         elif op == 'defer':
             group.update(status='later_phase', wait_reason=row.get('reason', 'Issue explicitly deferred'))
-        elif group['status'] not in ('unresolved', 'resolved'):
+        elif group['status'] not in ('unresolved', *TERMINAL):
             group.update(status='ready', wait_reason=None)
         _group_snapshot(group, op)
 
@@ -164,9 +196,19 @@ def _find_group(row, group_id):
     return groups.get(group_id) or groups.get(row['id'] + '::' + str(group_id))
 
 
-def _dependency_targets(bank, group, ref):
+def group_for_review(state, issue_id, group_id):
+    """Resolve public full/short review aliases exactly as bank dispositions do."""
+    bank = copy.deepcopy(_bank(state))
+    row = bank['issues'].get(issue_id)
+    return copy.deepcopy(_find_group(row, group_id)) if row is not None else None
+
+
+def _dependency_targets(bank, group, ref, target_type=None):
     if not isinstance(ref, str):
         return [], 'unresolved'
+    if target_type == 'issue_id':
+        targets = list(_ensure_groups(bank['issues'][ref])) if ref in bank['issues'] else []
+        return targets, 'resolved' if targets else 'unresolved'
     local = _ensure_groups(bank['issues'][group['issue_id']])
     if '::' not in ref:
         prefix = group['issue_id'] + '::' + ref
@@ -176,24 +218,67 @@ def _dependency_targets(bank, group, ref):
     all_groups = {gid for row in bank['issues'].values() for gid in _ensure_groups(row)}
     if ref in all_groups:
         return [ref], 'resolved'
-    if ref in bank['issues']:
-        return list(_ensure_groups(bank['issues'][ref])), 'resolved'
+    if target_type != 'group_id' and ref in bank['issues']:
+        targets = list(_ensure_groups(bank['issues'][ref]))
+        return targets, 'resolved' if targets else 'unresolved'
     return [], 'unresolved'
 
 
+def _dependency_entries(bank, group):
+    deps = group.get('dependencies', [])
+    deps = [deps] if isinstance(deps, str) else deps
+    if not isinstance(deps, list):
+        return [{'original': copy.deepcopy(deps), 'resolution': 'ambiguous', 'targets': [], 'kind': 'hard'}]
+    entries = []
+    for dep in deps:
+        try:
+            spec = _dependency_spec(dep)
+        except (ValueError, ActionRejected):
+            entries.append({'original': copy.deepcopy(dep), 'resolution': 'ambiguous', 'targets': [], 'kind': 'hard'})
+            continue
+        target_type = 'group_id' if 'group_id' in spec else 'issue_id' if 'issue_id' in spec else None
+        targets, resolution = _dependency_targets(bank, group, spec['ref'], target_type)
+        entries.append({**spec, 'original': copy.deepcopy(dep), 'targets': targets, 'resolution': resolution})
+    return entries
+
+
 def _normalize_dependencies(bank):
-    # Keep the source spelling; only unique same-issue aliases become group IDs.
+    # Source spelling stays intact, including old string dependencies.
     for row in bank['issues'].values():
         for group in _ensure_groups(row).values():
-            deps = group.get('dependencies', [])
-            deps = [deps] if isinstance(deps, str) else deps
-            references = []
-            for dep in deps if isinstance(deps, list) else []:
-                ref = dep if isinstance(dep, str) else dep.get('group_id', dep.get('issue_id', dep.get('id'))) if isinstance(dep, dict) else None
-                targets, resolution = _dependency_targets(bank, group, ref)
-                references.append({'original': copy.deepcopy(dep), 'resolved': targets[0] if len(targets) == 1 else targets,
-                                   'resolution': resolution})
-            group['dependency_references'] = references
+            group['dependency_references'] = [
+                {'original': entry['original'], 'resolved': entry['targets'][0] if len(entry['targets']) == 1 else entry['targets'],
+                 'resolution': entry['resolution']}
+                for entry in _dependency_entries(bank, group)]
+
+
+def _terminal_record(group):
+    for record in reversed(group.get('records', [])):
+        if record.get('status') != group['status']:
+            continue
+        if record.get('event') == 'review':
+            if record.get('review', {}).get('outcome') not in ('resolved', 'skip', 'retire'):
+                continue
+        elif record.get('event') not in ('add', 'revise', 'retire'):
+            continue
+        return record
+    return None
+
+
+def _reviewed_operation(state, group, operation_id, ancestors):
+    operations = group.get('operations', [])
+    candidates = [op for op in operations if op.get('operation_id') == operation_id] if operation_id else operations[-1:]
+    if len(candidates) != 1:
+        return None
+    operation = candidates[0]
+    actual = state['versions'].get(operation.get('child'), {})
+    judgment = operation.get('model_judgment', {})
+    if (operation.get('child') not in ancestors or actual.get('operation_id') != operation.get('operation_id')
+            or actual.get('parent') != operation.get('base') or operation.get('child') == operation.get('base')
+            or operation.get('outcome') not in EFFECT_OUTCOMES
+            or judgment.get('review_kind') != 'effect_judgment' or judgment.get('version') != operation.get('child')):
+        return None
+    return operation
 
 
 def apply_bank_delta(state, delta, observation_id):
@@ -225,6 +310,15 @@ def apply_bank_delta(state, delta, observation_id):
             if row is None:
                 raise ActionRejected('unknown_bank_issue', 'Unknown issue ID: ' + ident, 'bank_delta.id')
             if row['status'] == 'retired':
+                if gid is not None:
+                    group = _find_group(row, _id(gid, 'group ID'))
+                    if group is None:
+                        raise ActionRejected('unknown_bank_group', 'Unknown group ID', 'bank_delta.group_id')
+                if op in ('retire', 'keep') and not set(changes) - {'reason', 'rationale'}:
+                    _event(bank, 'retired_disposition', issue_id=ident, group_id=group['id'] if gid is not None else None,
+                           outcome=op, resolution='idempotent' if op == 'retire' else 'not_adopted',
+                           observation_id=observation_id, version=observation['version'], original=copy.deepcopy(item))
+                    continue
                 raise ActionRejected('retired_bank_issue', 'Retired issue is immutable; add a new explicit issue instead', 'bank_delta.id')
             if op != 'revise' and set(changes) - {'reason', 'rationale'}:
                 raise ActionRejected('bank_revise_required', 'Use revise to change a judgment or proposal', 'bank_delta.op')
@@ -235,7 +329,12 @@ def apply_bank_delta(state, delta, observation_id):
             if group is None:
                 raise ActionRejected('unknown_bank_group', 'Unknown group ID', 'bank_delta.group_id')
             if group['status'] == 'retired':
-                raise ActionRejected('retired_bank_group', 'Retired group is immutable; explicitly revise the issue instead', 'bank_delta.group_id')
+                if op in ('retire', 'keep') and not set(changes) - {'reason', 'rationale'}:
+                    _event(bank, 'retired_disposition', issue_id=ident, group_id=group['id'],
+                           outcome=op, resolution='idempotent' if op == 'retire' else 'not_adopted',
+                           observation_id=observation_id, version=observation['version'], original=copy.deepcopy(item))
+                    continue
+                raise ActionRejected('retired_bank_group', 'Retired group is immutable; add a new explicit group ID instead', 'bank_delta.group_id')
             group.update(copy.deepcopy(changes))
             if 'proposed_controls' in changes:
                 parts = parse_controls(changes['proposed_controls'], 'group_revision.proposed_controls', group['branch'])
@@ -246,7 +345,7 @@ def apply_bank_delta(state, delta, observation_id):
             prior_status = group['status']
             group.update(base_version=observation['version'], observation_id=observation_id, observation=observation_id,
                          status='retired' if op == 'retire' else 'later_phase' if op == 'defer' else
-                         'resolved' if op == 'keep' and prior_status == 'resolved' else
+                         prior_status if op == 'keep' and prior_status in TERMINAL else
                          'unresolved' if group.get('unresolved') else 'ready', wait_reason=changes.get('reason'))
             if op in ('keep', 'revise'):
                 group['reassessed_for_version'] = observation['version']
@@ -282,74 +381,87 @@ def validate_selected_issue(state, issue_id, base):
 
 
 def _effective_groups(state, bank, phase, base=None):
-    """Compute version/phase/dependency readiness without changing any stored record."""
+    """Compute independent freshness, branch and dependency facts; never append records."""
     base = base or state['current']; ancestors = _ancestry(state, base)
-    result = {}; issue_groups = {}
+    result = {}
     for row in bank['issues'].values():
-        issue_groups[row['id']] = []
-        for group in _ensure_groups(row).values():
-            group = copy.deepcopy(group); gid = group['id']
-            issue_groups[row['id']].append(gid)
-            if group['status'] != 'retired':
-                operation = group.get('operations', [])[-1] if group.get('operations') else {}
-                if group['base_version'] not in ancestors or (operation.get('child') and operation['child'] not in ancestors
-                        and group.get('reassessed_for_version') != base):
+        for stored in _ensure_groups(row).values():
+            group = copy.deepcopy(stored); gid = group['id']
+            operation = group.get('operations', [])[-1] if group.get('operations') else {}
+            offbranch = (group['base_version'] not in ancestors or
+                         bool(operation.get('child') and operation['child'] not in ancestors
+                              and group.get('reassessed_for_version') != base))
+            group.update(freshness='current' if group['base_version'] == base else 'stale',
+                         branch_status='off_selected_branch' if offbranch else 'on_selected_branch')
+            if row['status'] == 'retired':
+                group.update(status='retired', wait_reason='Issue explicitly retired')
+            elif group['status'] not in TERMINAL:
+                if offbranch:
                     group.update(status='off_selected_branch', wait_reason='Evidence belongs to an unselected branch; reassess on selected version')
                 elif group.get('unresolved') or group['status'] == 'unresolved':
                     group.update(status='unresolved', wait_reason='Unknown or ambiguous proposal; explicitly revise before execution')
-                elif row['status'] == 'retired':
-                    group.update(status='retired', wait_reason='Issue explicitly retired')
                 elif row['status'] == 'deferred':
                     group.update(status='later_phase', wait_reason=row.get('reason', 'Issue explicitly deferred'))
-                elif group['status'] == 'resolved':
-                    pass  # A later edit does not reopen a task explicitly closed by DSH.
                 elif group['status'] == 'awaiting_effect':
-                    operation = group.get('operations', [])[-1] if group.get('operations') else {}
-                    if operation.get('child') not in ancestors:
-                        group.update(status='off_selected_branch', wait_reason='After-version is not on selected branch; review selected version afresh')
+                    pass
                 elif group['base_version'] != base:
                     group.update(status='needs_reassessment', wait_reason='Proposal requires the actual selected-version observation')
-                elif group['status'] not in ('resolved', 'waiting_dependency', 'needs_reassessment', 'off_selected_branch'):
+                elif group['status'] not in ('needs_reassessment', 'off_selected_branch'):
                     if phase in ('G3', 'joint', 'G4', 'complete') or group['branch'] == phase:
-                        group.update(status='current' if group['status'] == 'current' else 'ready', wait_reason=None)
+                        group.update(status='waiting_dependency' if group.get('manual_wait') else
+                                     'current' if group['status'] == 'current' else 'ready', wait_reason=group.get('wait_reason') if group.get('manual_wait') else None)
                     else:
                         group.update(status='later_phase', wait_reason='Available in ' + group['branch'] + ' or joint editing, not ' + phase)
-            group['needs_reassessment'] = group['status'] in ('needs_reassessment', 'off_selected_branch', 'unresolved')
             result[gid] = group
-    edges = {}; missing = {}
-    for gid, group in result.items():
-        deps = group.get('dependencies', [])
-        if deps in (None, []):
-            deps = []
-        elif isinstance(deps, str):
-            deps = [deps]
-        elif not isinstance(deps, list):
-            missing[gid] = ['Ambiguous dependency structure; revise explicit IDs']; deps = []
-        edges[gid] = []
-        for dep in deps:
-            ref = dep if isinstance(dep, str) else dep.get('group_id', dep.get('issue_id', dep.get('id'))) if isinstance(dep, dict) else None
-            targets, resolution = _dependency_targets(bank, group, ref)
-            if not targets:
-                missing.setdefault(gid, []).append(('Ambiguous' if resolution == 'ambiguous' else 'Unknown') + ' dependency reference: ' + str(ref))
-            edges[gid].extend(targets)
-    def cyclic(start, node, visited):
+    entries = {gid: _dependency_entries(bank, group) for gid, group in result.items()}
+    edges = {gid: [target for entry in deps for target in entry['targets']] for gid, deps in entries.items()}
+    def invalid_path(node, path):
+        if node in path:
+            return 'Cyclic dependency; explicitly revise or retire the dependency'
+        for entry in entries[node]:
+            if entry['resolution'] != 'resolved':
+                return ('Ambiguous' if entry['resolution'] == 'ambiguous' else 'Unknown') + ' dependency reference: ' + str(entry.get('ref'))
         for target in edges[node]:
-            if target == start:
-                return True
-            if target not in visited and cyclic(start, target, visited | {target}):
-                return True
-        return False
+            reason = invalid_path(target, path | {node})
+            if reason:
+                return reason
+        return None
     for gid, group in result.items():
-        reasons = missing.get(gid, [])
-        if cyclic(gid, gid, {gid}):
-            reasons = [*reasons, 'Cyclic dependency; explicitly revise or retire the dependency']
-        unmet = [target for target in edges[gid] if result[target]['status'] not in ('resolved', 'retired')]
-        if unmet:
-            reasons = [*reasons, 'Waiting for dependency: ' + ', '.join(unmet)]
-        if reasons and group['status'] not in ('retired', 'resolved', 'off_selected_branch', 'unresolved', 'awaiting_effect'):
-            group.update(status='waiting_dependency', wait_reason='; '.join(reasons))
-        elif not reasons and group['status'] == 'waiting_dependency' and not group.get('manual_wait'):
-            group.update(status='ready' if phase == group['branch'] or phase == 'joint' else 'later_phase', wait_reason=None)
+        invalid = invalid_path(gid, set()); reasons = [invalid] if invalid else []
+        checks = []; offbranch_dependency = False; pending_waiver = False
+        for entry in entries[gid]:
+            for target_id in entry['targets']:
+                target = result[target_id]; terminal = _terminal_record(target)
+                terminal_on_branch = bool(terminal and terminal.get('base_version') in ancestors)
+                op = _reviewed_operation(state, target, entry.get('operation_id'), ancestors) if entry.get('requirement') == 'effect' else None
+                satisfied = bool(op) if entry.get('requirement') == 'effect' else bool(target['status'] == 'resolved' and terminal_on_branch and target['branch_status'] == 'on_selected_branch')
+                waiver = None
+                waivable = (entry['kind'] == 'soft' and target['status'] in ('skipped', 'retired') and terminal_on_branch)
+                if waivable:
+                    waiver = next((w for w in reversed(group.get('waiver_records', []))
+                                   if w.get('target_group_id') == target_id and w.get('target_record_id') == terminal['record_id']
+                                   and w.get('selected_version') in ancestors and w.get('dependency') == entry['original']), None)
+                status = 'reviewed' if satisfied and op else 'resolved' if satisfied else 'waived' if waiver else 'waiver_pending' if waivable else 'waiting'
+                checks.append({'dependency': copy.deepcopy(entry['original']), 'target_group_id': target_id,
+                               'kind': entry['kind'], 'requirement': entry.get('requirement'), 'status': status,
+                               'target_status': target['status'], 'target_record_id': terminal.get('record_id') if terminal else None,
+                               'operation_id': op['operation_id'] if op else entry.get('operation_id'),
+                               'outcome': op['outcome'] if op else None})
+                pending_waiver |= status == 'waiver_pending'
+                latest_op = target.get('operations', [])[-1] if target.get('operations') else {}
+                offbranch_dependency |= bool(not satisfied and not waiver and (target['branch_status'] == 'off_selected_branch'
+                    or (entry.get('requirement') == 'effect' and latest_op.get('child') and latest_op['child'] not in ancestors)))
+                if not satisfied and not waiver:
+                    reasons.append('Waiting for dependency: ' + target_id + ' (' + entry['kind'] + ' ' + str(entry.get('requirement')) + ')')
+        group.update(dependency_checks=checks, dependency_override_allowed=bool(reasons) and not invalid
+                     and bool(checks) and all(c['kind'] == 'soft' and c['status'] != 'waiver_pending' for c in checks)
+                     and not offbranch_dependency)
+        if group['status'] not in (*TERMINAL, 'off_selected_branch', 'unresolved', 'awaiting_effect'):
+            if pending_waiver or offbranch_dependency:
+                group.update(status='needs_reassessment', wait_reason='Dependency disposition/branch changed; reconcile then explicitly reassess actual selected version')
+            elif reasons and group['status'] != 'needs_reassessment':
+                group.update(status='waiting_dependency', wait_reason='; '.join(reasons))
+        group['needs_reassessment'] = group['status'] in ('needs_reassessment', 'off_selected_branch', 'unresolved')
     return result
 
 
@@ -365,6 +477,13 @@ def _ordered(groups, phase):
     return ordered
 
 
+def _pre_tone_wb_group(group):
+    parts = group.get('proposed_controls', [])
+    return (group.get('branch') == 'color' and group.get('module') == 'wb' and bool(parts)
+            and all(part.get('control_id') in ('wb.temp', 'wb.tint')
+                    and not part.get('unresolved_reason') for part in parts))
+
+
 def resolve_selected_group(state, issue_id, group_id, base, action=None):
     """Pure selection guard; no automatic group change, action clipping or native IO."""
     require_version(state, base)
@@ -376,9 +495,13 @@ def resolve_selected_group(state, issue_id, group_id, base, action=None):
     if row is None or row['status'] != 'active':
         raise ActionRejected('inactive_issue', 'Select an active known issue', 'selected_issue_id')
     phase = state.get('workflow', {}).get('phase')
-    if phase not in BRANCHES:
+    pre_tone = phase == 'G1' and isinstance(action, dict) and action.get('name') == 'pre_tone_wb'
+    if phase not in BRANCHES and not pre_tone:
         raise ActionRejected('group_phase', 'Groups execute only in an authoritative editing phase', 'action')
-    effective = _effective_groups(state, bank, phase, base)
+    if pre_tone and not group_id:
+        raise ActionRejected('group_selection_required', 'pre_tone_wb requires an explicit WB scalar group', 'selected_group_id')
+    effective_phase = 'color' if pre_tone else phase
+    effective = _effective_groups(state, bank, effective_phase, base)
     groups = [g for g in effective.values() if g['issue_id'] == issue_id]
     if group_id is None:
         eligible = [g for g in groups if g['status'] in ('ready', 'current')]
@@ -389,15 +512,18 @@ def resolve_selected_group(state, issue_id, group_id, base, action=None):
         group = next((g for g in groups if g['id'] in (group_id, issue_id + '::' + group_id)), None)
         if group is None:
             raise ActionRejected('unknown_group', 'Unknown selected group for this issue', 'selected_group_id')
+    if pre_tone and not _pre_tone_wb_group(group):
+        raise ActionRejected('group_phase', 'G1 pre_tone_wb selects only a color WB scalar group', 'selected_group_id')
     selection_reason = ((action or {}).get('selection_reason') or (action or {}).get('override_reason')) if isinstance(action, dict) else None
-    if (group['status'] == 'waiting_dependency' and group['base_version'] == base
+    if (group['status'] == 'waiting_dependency' and group['freshness'] == 'current'
+            and group['branch_status'] == 'on_selected_branch' and group.get('dependency_override_allowed')
             and group_id and isinstance(selection_reason, str) and selection_reason.strip()):
         group['dependency_override'] = {'reason': selection_reason, 'waiting_reason': group.get('wait_reason'),
                                         'base_version': base, 'claim_type': 'explicit_model_selection'}
         group.update(status='ready', wait_reason=None)
     if group['status'] not in ('ready', 'current'):
         raise ActionRejected('group_not_ready', group.get('wait_reason') or 'Selected group is not ready: ' + group['status'], 'selected_group_id')
-    if phase != 'joint' and group['branch'] != phase:
+    if effective_phase != 'joint' and group['branch'] != effective_phase:
         raise ActionRejected('group_phase', 'Selected group is outside the authoritative phase', 'selected_group_id')
     if action is not None:
         arguments = action.get('arguments', action) if isinstance(action, dict) else action
@@ -428,7 +554,7 @@ def record_operation(state, issue_id, operation_id, base, child, *, group_id=Non
     if group is None:
         row = validate_selected_issue(state, issue_id, base)
         if row is not None:
-            candidates = [g for g in _ensure_groups(row).values() if g['status'] not in ('retired', 'resolved', 'unresolved')]
+            candidates = [g for g in _ensure_groups(row).values() if g['status'] not in (*TERMINAL, 'unresolved')]
             if len(candidates) == 1:
                 group = candidates[0]
     bank = copy.deepcopy(_bank(state))
@@ -469,7 +595,7 @@ def invalidate_bank(state, newversion, except_issue=None):
         groups = _ensure_groups(row)
         group_changed = False
         for group in groups.values():
-            if group['status'] in ('retired', 'resolved'):
+            if group['status'] in TERMINAL:
                 continue
             op = group.get('operations', [])[-1] if group.get('operations') else {}
             offbranch = group['base_version'] not in ancestors or (op.get('child') and op['child'] not in ancestors
@@ -520,7 +646,7 @@ def record_group_review(state, review, observation_id):
             updates.insert(0, {**effect, 'issue_id': linked['issue_id'], 'group_id': linked['group_id'],
                                'operation_id': linked['operation_id'], 'reason': effect.get('evidence', effect.get('reason'))})
     committed = []; warnings = []
-    dispositions = (*OPS[1:], 'resolved', 'needs_reassessment', 'waiting_dependency')
+    dispositions = (*OPS[1:], 'skip', 'resolved', 'needs_reassessment', 'waiting_dependency')
     for update in updates:
         if not isinstance(update, dict):
             raise ValueError('Group review must be an object')
@@ -533,6 +659,20 @@ def record_group_review(state, review, observation_id):
             raise ActionRejected('group_review_reason_required', 'Group review requires public evidence/reason', 'review.group_reviews.reason')
         outcome = update.get('outcome', update.get('result', update.get('judgment')))
         operation_id = update.get('operation_id'); operation = None
+        if row['status'] == 'retired' or group['status'] == 'retired':
+            metadata_fields = {'issue_id', 'group_id', 'outcome', 'result', 'judgment', 'reason', 'evidence', 'operation_id'}
+            if outcome not in ('keep', 'retire') or set(update) - metadata_fields:
+                raise ActionRejected('retired_bank_group',
+                    'Retired group is immutable; add a new explicit group ID instead', 'review.group_reviews')
+            result = {**copy.deepcopy(update), 'outcome': outcome, 'observation_id': observation_id,
+                      'version': observation['version'], 'review_kind': 'proposal_disposition',
+                      'resolution': 'idempotent' if outcome == 'retire' else 'not_adopted',
+                      'claim_type': 'retired_disposition_metadata_only'}
+            _event(bank, 'retired_disposition', **{**result, 'issue_id': row['id'], 'group_id': group['id']})
+            committed.append(result)
+            continue
+        if outcome == 'skip' and observation['version'] != state['current']:
+            raise ActionRejected('stale_group_skip', 'Skip requires the actual selected-version observation', 'review.group_reviews.outcome')
         reference = None
         if outcome in dispositions:
             if operation_id:
@@ -557,8 +697,9 @@ def record_group_review(state, review, observation_id):
                 changes = {k: update[k] for k in ('priority', 'dependencies') if k in update}
                 _validate_changes(changes)
                 group.update(copy.deepcopy(changes))
-                group.update(status=outcome, manual_wait=outcome == 'waiting_dependency', wait_reason=reason)
-        elif outcome in ('improved', 'worse', 'mixed', 'uncertain', 'supported', 'contradicted', 'not_visible'):
+                group.update(status='skipped' if outcome == 'skip' else outcome,
+                             manual_wait=outcome == 'waiting_dependency', wait_reason=reason)
+        elif outcome in EFFECT_OUTCOMES:
             operation = next((op for op in group.get('operations', []) if op['operation_id'] == operation_id), None)
             expectation = next((e for e in expectations if e.get('operation_id') == operation_id and
                                 (not update.get('expectation_id') or e.get('id') == update['expectation_id'])), None)
@@ -576,7 +717,7 @@ def record_group_review(state, review, observation_id):
                 group.update(status='needs_reassessment', wait_reason='Model effect reviewed; keep/revise/retire/defer explicitly before reuse')
         else:
             raise ActionRejected('unknown_group_review_outcome', 'Unknown group review outcome', 'review.group_reviews.outcome')
-        result = {**copy.deepcopy(update), 'observation_id': observation_id,
+        result = {**copy.deepcopy(update), 'outcome': outcome, 'observation_id': observation_id,
                   'version': observation['version'], 'claim_type': 'model_judgment',
                   'review_kind': 'proposal_disposition' if outcome in dispositions else 'effect_judgment'}
         if reference:
@@ -598,10 +739,104 @@ def record_group_review(state, review, observation_id):
     return copy.deepcopy(committed)
 
 
+def reconcile_dependencies(state, observation_id):
+    """Persist dependency waivers/branch invalidations once, without executing edits.
+
+    The reviewed source may precede a successful child/selection. Its version is
+    provenance, not an invented review of the selected version.
+    """
+    require_ready(state)
+    observation = observation_for(state, observation_id, reviewed=True)
+    bank = copy.deepcopy(_bank(state)); base = state['current']
+    effective = _effective_groups(state, bank, state.get('workflow', {}).get('phase', 'joint'))
+    changed = []; waivers = []
+    for gid, derived in effective.items():
+        row = bank['issues'][derived['issue_id']]; group = _ensure_groups(row)[gid]
+        if group['status'] in TERMINAL:
+            continue
+        added = []
+        for check in derived['dependency_checks']:
+            if check['status'] != 'waiver_pending':
+                continue
+            target = effective[check['target_group_id']]
+            waiver = {'record_id': 'waiver:' + gid + ':' + str(len(group.get('waiver_records', [])) + 1),
+                      'dependent_group_id': gid, 'dependency': copy.deepcopy(check['dependency']),
+                      'target_group_id': target['id'], 'target_record_id': check['target_record_id'],
+                      'target_latest_record_id': target['records'][-1]['record_id'] if target['records'] else None,
+                      'target_status': target['status'], 'observation_id': observation_id,
+                      'version': observation['version'], 'selected_version': base,
+                      'reason': 'Soft dependency waived after explicit upstream ' + target['status'] + '; reassess dependent before execution'}
+            group.setdefault('waiver_records', []).append(waiver); added.append(copy.deepcopy(waiver))
+        invalid = any(
+            check['status'] == 'waiting' and check['target_group_id'] in effective and
+            (effective[check['target_group_id']]['branch_status'] == 'off_selected_branch' or
+             (check['requirement'] == 'effect' and any(op.get('child') not in _ancestry(state, base)
+                 for op in effective[check['target_group_id']].get('operations', [])[-1:])))
+            for check in derived['dependency_checks'])
+        marker = {'selected_version': base, 'checks': derived['dependency_checks']} if invalid else None
+        invalid_changed = marker is not None and marker != group.get('dependency_invalidation')
+        if not added and not invalid_changed:
+            continue
+        if marker is not None:
+            group['dependency_invalidation'] = copy.deepcopy(marker)
+        if group['status'] != 'awaiting_effect':
+            group.update(status='needs_reassessment', needs_reassessment=True,
+                         wait_reason='Dependency changed; fresh explicit keep/revise required on selected version')
+        row['needs_reassessment'] = True
+        _group_snapshot(group, 'dependency_reconciliation', waiver_records=added,
+                        source_observation_id=observation_id, source_version=observation['version'], selected_version=base)
+        _snapshot(row, 'dependency_reconciliation', selected_group_id=gid, waiver_records=added,
+                  source_observation_id=observation_id, source_version=observation['version'], selected_version=base)
+        changed.append(gid); waivers.extend(added)
+    if changed:
+        _event(bank, 'dependency_reconciliation', observation_id=observation_id, version=observation['version'],
+               selected_version=base, group_ids=changed, waiver_records=waivers)
+        state['proposal_bank'] = bank
+    return {'changed': bool(changed), 'group_ids': changed, 'waiver_records': copy.deepcopy(waivers)}
+
+
+def spawn_joint_diagnostic(state, debt, diagnosis, observation_id, anchors=None, existing_issue_id=None):
+    """Link one debt to a lossless diagnosis-only issue; transaction retries are no-ops."""
+    require_ready(state); observation = observation_for(state, observation_id, reviewed=True)
+    debt = public_copy(debt)
+    if not isinstance(debt, dict):
+        raise ValueError('Explicit debt object required')
+    debt_id = _id(debt.get('id'), 'debt ID'); _id(diagnosis, 'diagnosis')
+    bank = copy.deepcopy(_bank(state))
+    linked = [row for row in bank['issues'].values() if debt_id in row.get('source_debt_ids', [])]
+    if linked:
+        if len(linked) != 1 or (existing_issue_id is not None and linked[0]['id'] != existing_issue_id):
+            raise ActionRejected('joint_debt_link_conflict', 'Debt already has a different diagnostic issue link', 'existing_issue_id')
+        return linked[0]['id']
+    ident = _id(existing_issue_id, 'existing issue ID') if existing_issue_id is not None else 'joint-from:' + debt_id
+    draft = {**state, 'proposal_bank': bank}
+    if existing_issue_id is None:
+        if ident in bank['issues']:
+            raise ActionRejected('joint_diagnostic_identity', 'Stable diagnostic ID already belongs to another issue', 'id')
+        apply_bank_delta(draft, [{'op': 'add', 'id': ident, 'branch': 'joint', 'diagnosis': diagnosis,
+                                 'groups': [], **{k: copy.deepcopy(debt[k]) for k in ('evidence', 'target_change', 'protected') if k in debt}}], observation_id)
+        bank = draft['proposal_bank']
+    elif (ident not in bank['issues'] or bank['issues'][ident]['status'] == 'retired'
+          or (bank['issues'][ident]['branch'] != 'joint' and not any(
+              g['branch'] == 'joint' and g['status'] != 'retired' for g in _ensure_groups(bank['issues'][ident]).values()))):
+        raise ActionRejected('joint_diagnostic_issue', 'Existing diagnostic link needs a nonretired Joint issue/group', 'existing_issue_id')
+    row = bank['issues'][ident]
+    source = {'debt_id': debt_id, 'debt': copy.deepcopy(debt), 'diagnosis': diagnosis,
+              'observation_id': observation_id, 'version': observation['version'],
+              'selected_version': state['current'], 'anchors': public_copy(anchors)}
+    row.setdefault('source_debt_ids', []).append(debt_id)
+    row.setdefault('source_refs', []).append(source)
+    _snapshot(row, 'joint_diagnostic', source=source)
+    _event(bank, 'joint_diagnostic', issue_id=ident, debt_id=debt_id, source=source)
+    state['proposal_bank'] = bank
+    return ident
+
+
 def _summary(group):
     keys = ('id', 'group_id', 'issue_id', 'branch', 'module', 'step', 'status', 'priority',
             'base_version', 'observation_id', 'source_revision', 'source_paths', 'dependencies', 'dependency_references',
-            'needs_reassessment', 'wait_reason', 'reorder_override')
+            'needs_reassessment', 'wait_reason', 'reorder_override', 'freshness', 'branch_status',
+            'dependency_checks', 'waiver_records')
     return {key: copy.deepcopy(group[key]) for key in keys if key in group}
 
 
@@ -632,6 +867,42 @@ def branch_workflow(state, phase):
             'selected_version': state['current']}
 
 
+def _operation_summary(operation, bank):
+    fields = ('issue_id', 'group_id', 'operation_id', 'base', 'child', 'outcome', 'dependency_override')
+    result = {key: copy.deepcopy(operation[key]) for key in fields if key in operation}
+    event = next((event for event in bank['events'] if event.get('kind') == 'operation'
+                  and event.get('operation_id') == operation.get('operation_id')), {})
+    result['record_ref'] = {'record_id': event.get('id'), 'kind': 'bank_event',
+                            'operation_id': operation.get('operation_id'), 'full_history_available': True}
+    if operation.get('model_judgment'):
+        result['effect_review'] = {key: copy.deepcopy(operation['model_judgment'][key])
+                                   for key in ('observation_id', 'version', 'outcome', 'review_kind')
+                                   if key in operation['model_judgment']}
+    return result
+
+
+def _compact_memory(row):
+    result = {k: copy.deepcopy(v) for k, v in row.items() if k not in ('records', 'operations', 'task_groups')}
+    if 'source_refs' in result:
+        result['source_refs'] = [{k: copy.deepcopy(source[k]) for k in
+                                 ('debt_id', 'observation_id', 'version', 'selected_version') if k in source}
+                                for source in row['source_refs']]
+    if 'waiver_records' in result:
+        result['waiver_records'] = [{k: copy.deepcopy(waiver[k]) for k in
+                                    ('record_id', 'target_group_id', 'target_record_id', 'target_status',
+                                     'observation_id', 'version', 'selected_version') if k in waiver}
+                                   for waiver in row['waiver_records']]
+    for field in ('wb_reference_contract', 'tone_reference_contract'):
+        if row.get(field):
+            result[field] = [copy.deepcopy(row[field][-1])]
+            result[field + '_history'] = [{k: copy.deepcopy(contract[k]) for k in
+                                          ('observation_id', 'settings_version', 'phase') if k in contract}
+                                         for contract in row[field][:-1]]
+    if row.get('records'):
+        result['history_ref'] = {'record_id': row['records'][-1]['record_id'], 'issue_id': row.get('issue_id', row['id'])}
+    return result
+
+
 def bank_projection(state, phase):
     """Current + pending review + phase candidates, with all useful ID summaries.
 
@@ -643,18 +914,20 @@ def bank_projection(state, phase):
     bank = copy.deepcopy(_bank(state)); rows = list(bank['issues'].values())
     groups = _ordered(_effective_groups(state, bank, phase).values(), phase)
     branches = {'tone', 'color', 'joint'} if phase in ('G3', 'joint', 'G4', 'complete') else {'color', 'joint'} if phase == 'G2' else {'tone'} if phase in ('G1', 'tone') else {'color'}
-    relevant = [g for g in groups if g['branch'] in branches and g['status'] != 'retired']
+    relevant = [g for g in groups if g['branch'] in branches and g['status'] not in TERMINAL]
     current = [g for g in relevant if g['status'] == 'current']
     selected_id = state.get('selected_group_id')
     if selected_id:
-        current.extend(g for g in relevant if g['id'] == selected_id and g not in current)
+        current.extend(g for g in relevant if g['id'] == selected_id and g not in current
+                       and g['status'] not in ('resolved', 'retired'))
     pending = [g for g in relevant if g['status'] == 'awaiting_effect']
     ready = [g for g in relevant if g['status'] == 'ready'][:3]
     reassessment = [g for g in relevant if g['status'] == 'needs_reassessment' or
                     (phase in ('G1', 'G2', 'G3') and g['status'] == 'later_phase' and not g.get('unresolved'))][:3]
     candidates = [*ready, *[g for g in reassessment if g not in ready]]
     def body(group):
-        return {**{k: copy.deepcopy(v) for k, v in group.items() if k != 'records'},
+        return {**_compact_memory(group),
+                'operations': [_operation_summary(op, bank) for op in group.get('operations', [])],
                 'issue_ref': group['issue_id'], 'diagnosis': bank['issues'][group['issue_id']]['diagnosis']}
     packet = {'current': [body(g) for g in current], 'pending_review': [body(g) for g in pending],
               'candidates': [body(g) for g in candidates], 'ready_candidates': [body(g) for g in ready],
@@ -664,12 +937,18 @@ def bank_projection(state, phase):
               'issues': {r['id']: {'diagnosis': r['diagnosis'], 'priority': r.get('priority', 0), 'branch': r['branch']} for r in rows},
               'selection_required': len([g for g in relevant if g['status'] in ('ready', 'current')]) > 1,
               'selected_version': state['current'], 'full_history_available': True}
+    if phase == 'G1':
+        wb_groups = [g for g in groups if _pre_tone_wb_group(g)]
+        packet['pre_tone_wb_candidates'] = [body(g) for g in wb_groups if g['status'] not in (*TERMINAL, 'awaiting_effect')]
+        packet['pre_tone_wb_pending_review'] = [body(g) for g in wb_groups if g['status'] == 'awaiting_effect']
+        packet['pre_tone_wb_policy'] = 'Only explicit G1 pre_tone_wb selects these color WB scalar groups; this does not open photo_edit or change phase. Stale/off-branch/unresolved/dependency rules still apply; once-use is worker-owned.'
     selected_issues = list(dict.fromkeys(g['issue_id'] for g in [*current, *pending, *candidates]))
     # Compatibility navigation for older callers, including diagnosis-only issues.
     if not selected_issues:
         selected_issues = [r['id'] for r in rows if r['status'] == 'active' and r['branch'] in branches][:3]
     return {'revision': bank['revision'], 'phase': phase,
-            'active': [{k: copy.deepcopy(v) for k, v in bank['issues'][ident].items() if k not in ('records', 'task_groups')} for ident in selected_issues],
+            'active': [{**_compact_memory(bank['issues'][ident]),
+                        'operations': [_operation_summary(op, bank) for op in bank['issues'][ident].get('operations', [])]} for ident in selected_issues],
             'summary': [{'id': r['id'], 'branch': r['branch'], 'status': r['status'],
                          'priority': r.get('priority', 0), 'base_version': r['base_version'],
                          'needs_reassessment': r['needs_reassessment'],
@@ -677,6 +956,127 @@ def bank_projection(state, phase):
                          'groups': [_summary(g) for g in groups if g['issue_id'] == r['id']]} for r in rows],
             'work_packet': packet, 'branch_workflow': branch_workflow(state, phase),
             'total': len(rows), 'full_records_available': True}
+
+
+def bind_wb_assessment(state, assessment):
+    """Append explicit WB target intent without changing tasks, values or status.
+
+    Missing/ambiguous optional links stay unbound, never become a new issue or
+    an execution gate. Repeating the same host-bound assessment is idempotent.
+    """
+    bank = copy.deepcopy(_bank(state))
+    if not isinstance(assessment, dict):
+        raise ValueError('Host-bound WB assessment required')
+    version = assessment.get('settings_version')
+    require_version(state, version)
+    observation = observation_for(state, assessment.get('observation_id'))
+    if observation['version'] != version:
+        raise ValueError('WB assessment source/version mismatch')
+    issue_id, group_id = assessment.get('issue_id'), assessment.get('group_id')
+    targets = []
+    for row in bank['issues'].values():
+        if issue_id is not None and row['id'] != issue_id:
+            continue
+        for group in _ensure_groups(row).values():
+            if group_id is not None:
+                if group['id'] in (group_id, row['id'] + '::' + group_id):
+                    targets.append((row, group))
+            elif group.get('module') == 'wb' and (issue_id is not None or group.get('base_version') == version):
+                targets.append((row, group))
+    if group_id is not None and len(targets) != 1:
+        targets = []  # Never infer an ambiguous short ID across issues.
+    contract = public_copy({
+        'observation_id': assessment['observation_id'], 'settings_version': version,
+        'phase': assessment.get('phase'), 'comparison_mode': assessment.get('comparison_mode'),
+        'reference_status': assessment.get('reference_status'),
+        'reference_pairs': assessment.get('reference_pairs', []),
+        'target_change': {'target_intent': assessment.get('target_intent'),
+                          'intent_reason': assessment.get('intent_reason'),
+                          'wb_task_status': assessment.get('wb_task_status'), 'reason': assessment.get('reason')},
+        'protected': {'target_intent': assessment.get('target_intent'),
+                      'atmosphere': assessment.get('atmosphere'),
+                      'rule': 'Preserve intentional cast, material and lighting roles; a neutral reference is not a mandate to neutralize the author target.'},
+        'claim_type': 'model_wb_target_contract_not_effect_verdict'})
+    touched_rows = {}; bound = []
+    for row, group in targets:
+        entries = group.setdefault('wb_reference_contract', [])
+        if contract not in entries:
+            entries.append(copy.deepcopy(contract))
+            _group_snapshot(group, 'wb_assessment_binding', assessment=copy.deepcopy(contract))
+            touched_rows[row['id']] = row
+            bound.append(group['id'])
+    explicit_row = bank['issues'].get(issue_id) if issue_id is not None and group_id is None else None
+    for row in [*touched_rows.values(), *([explicit_row] if explicit_row and explicit_row['id'] not in touched_rows else [])]:
+        entries = row.setdefault('wb_reference_contract', [])
+        if contract not in entries:
+            entries.append(copy.deepcopy(contract)); touched_rows[row['id']] = row
+    if touched_rows:
+        for row in touched_rows.values():
+            _snapshot(row, 'wb_assessment_binding', assessment=copy.deepcopy(contract))
+        _event(bank, 'wb_assessment_binding', observation_id=assessment['observation_id'],
+               version=version, issue_ids=list(touched_rows), group_ids=bound)
+        state['proposal_bank'] = bank
+    return {'issue_ids': list(touched_rows), 'group_ids': bound, 'changed': bool(touched_rows)}
+
+
+def bind_tone_assessment(state, bound):
+    """Attach only explicit target/protection references; never infer task values.
+
+    Unknown optional references remain unbound and do not gate execution. A
+    repeated assessment is idempotent; source snapshots and statuses stay intact.
+    """
+    from photo_tone_guidance import validate_tone_assessment
+    if not isinstance(bound, dict):
+        raise ValueError('Host-bound Tone assessment required')
+    observation = observation_for(state, bound.get('observation_id'))
+    validated = validate_tone_assessment(
+        {key: bound[key] for key in ('items', 'reason', 'neutral_anchors') if key in bound}, observation)
+    if bound != validated:
+        raise ValueError('Tone assessment source binding mismatch')
+    bank = copy.deepcopy(_bank(state))
+    touched, groups_bound, unbound = {}, [], []
+    for item in bound['items']:
+        issue_id, group_id = item.get('issue_id'), item.get('group_id')
+        rows = ([bank['issues'][issue_id]] if issue_id in bank['issues'] else []) if issue_id is not None else list(bank['issues'].values())
+        targets = []
+        if group_id is not None:
+            targets = [(row, group) for row in rows for group in _ensure_groups(row).values()
+                       if group['id'] in (group_id, row['id'] + '::' + group_id)]
+            if len(targets) != 1:
+                targets = []
+        elif issue_id is not None and rows:
+            targets = [(rows[0], None)]
+        if not targets:
+            unbound.append(item['id'])
+            continue
+        contract = public_copy({
+            **{key: bound[key] for key in ('observation_id', 'settings_version', 'phase', 'comparison_mode', 'view_mode')},
+            'item': item, 'reason': bound['reason'], 'neutral_anchors': bound['neutral_anchors'],
+            'target_change': {'attribution': item['attribution'], 'evidence': item['evidence'], 'handoff': item['handoff']},
+            'protected': {'author_region': item['author_region'], 'current_region': item['current_region'],
+                          'material': item['material'], 'lighting': item['lighting'], 'protection': item['protection']},
+            'claim_type': 'model_tone_target_contract_not_effect_verdict'})
+        for row, group in targets:
+            changed = False
+            if group is not None:
+                entries = group.setdefault('tone_reference_contract', [])
+                if contract not in entries:
+                    entries.append(copy.deepcopy(contract))
+                    _group_snapshot(group, 'tone_assessment_binding', assessment=contract)
+                    groups_bound.append(group['id']); changed = True
+            entries = row.setdefault('tone_reference_contract', [])
+            if contract not in entries:
+                entries.append(copy.deepcopy(contract)); changed = True
+            if changed:
+                touched[row['id']] = row
+    if touched:
+        for row in touched.values():
+            _snapshot(row, 'tone_assessment_binding', assessment=public_copy(bound))
+        _event(bank, 'tone_assessment_binding', observation_id=bound['observation_id'],
+               version=bound['settings_version'], issue_ids=list(touched), group_ids=list(dict.fromkeys(groups_bound)))
+        state['proposal_bank'] = bank
+    return {'issue_ids': list(touched), 'group_ids': list(dict.fromkeys(groups_bound)),
+            'changed': bool(touched), 'unbound_items': unbound}
 
 
 def bank_history(state, issue_id=None):

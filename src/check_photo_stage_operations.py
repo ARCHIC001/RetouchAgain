@@ -7,7 +7,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import photo_stage_operations as stage
-from photo_capability_catalog import _check, COMMAND_IDS
+from photo_capability_catalog import (
+    _check, _result_contract, build_catalog, COMMAND_IDS, module_for, validate_commands,
+)
 
 
 def dependencies():
@@ -61,6 +63,11 @@ class FakeNative:
         self.stage_phase = 'joint'
         self.failure = None
         self.native_controls = controls()
+        self.wb_pick_scale = self.value['wb'].get('scale', 'legacy')
+        self.wb_pick_result = {'temp': 5732, 'tint': 7}
+        self.wb_apply_scale = self.value['wb'].get('scale', 'legacy')
+        self.as_shot_wb = {'temp': 5375, 'tint': 13}
+        self.normalized_legacy_wb = {'temp': 6125, 'tint': -8}
 
     def settings(self):
         return copy.deepcopy(self.value)
@@ -74,10 +81,24 @@ class FakeNative:
         self.active = None
         if self.failure == 'restore':
             self.value['geometry']['rotate'] = 1
+        if self.value != base:
+            raise ValueError('Full settings restore/readback mismatch')
 
     def apply(self, base, args):
         self.calls.append(('apply', copy.deepcopy(args)))
         self.restore(base)
+        if self.failure == 'apply_throw':
+            raise RuntimeError('Unknown native scalar outcome')
+        if set(args.get('values', {})).intersection(stage.PRE_TONE_WB_IDS):
+            wb = self.value['wb']
+            if wb['mode'] == 'asShot':
+                wb.update(self.as_shot_wb)
+            elif wb.get('scale', 'legacy') == 'legacy' and self.wb_apply_scale == 'kelvin':
+                wb.update(self.normalized_legacy_wb)
+            wb.update(mode='custom')
+            wb.pop('scale', None)
+            if self.wb_apply_scale != 'legacy':
+                wb['scale'] = self.wb_apply_scale
         for ident, value in args.get('values', {}).items():
             path = next((k for k, v in stage.SETTINGS_PATHS.items() if v == ident), ident).split('.')
             target = self.value
@@ -85,6 +106,26 @@ class FakeNative:
                 target = target.setdefault(part, {})
             target[path[-1]] = value
         merge(self.value, args.get('settings', {}))
+        if self.stage_phase == 'pre_tone_wb':
+            if self.failure in ('apply_bad_value', 'apply_tiny_value'):
+                key = next(iter(args['values'])).split('.')[1]
+                self.value['wb'][key] += 1 if self.failure == 'apply_bad_value' else 1e-9
+            if self.failure == 'apply_bool': self.value['wb']['tint'] = True
+            if self.failure == 'apply_mode': self.value['wb']['mode'] = 'asShot'
+            if self.failure == 'apply_scale': self.value['wb']['scale'] = 'relative'
+            if self.failure == 'apply_downgrade': self.value['wb'].pop('scale', None)
+            if self.failure == 'apply_missing_axis': self.value['wb'].pop('temp')
+            if self.failure == 'apply_nonfinite': self.value['wb']['tint'] = float('nan')
+            if self.failure == 'apply_axis_range': self.value['wb']['tint'] = 151
+            if self.failure == 'apply_other_axis': self.value['wb']['tint'] += 1
+            if self.failure == 'apply_metadata': self.value['wb']['unexpected'] = True
+            if self.failure == 'apply_light': self.value['light']['contrast'] += 1e-9
+            if self.failure == 'apply_mask': self.value['masks'][0]['adjust']['temp'] += 1
+            if self.failure == 'apply_rgb': self.value['curve']['red'] = []
+            if self.failure == 'apply_point': self.value['point_colors'].append({'hue': 3})
+            if self.failure == 'apply_profile': self.value['profile']['amount'] += 1
+            if self.failure == 'apply_unknown': self.value['unknown_native_field'] = True
+            if self.failure == 'apply_pending': self.value['pending'] = True
         return self.settings()
 
     def call(self, tool, command):
@@ -136,6 +177,27 @@ class FakeNative:
                 self.value['masks'].remove(current)
                 self.active = self.value['masks'][-1]['id'] if self.value['masks'] else None
             result = None if ident == 'mask.select' else {'activeMask': self.active}
+        elif ident == 'develop.wbPick':
+            result = copy.deepcopy(self.wb_pick_result)
+            self.value['wb'].update(result, mode='custom')
+            self.value['wb'].pop('scale', None)
+            if self.wb_pick_scale != 'legacy':
+                self.value['wb']['scale'] = self.wb_pick_scale
+            if self.failure in ('wb_temp', 'wb_tint', 'wb_small_mismatch'):
+                key = 'tint' if self.failure == 'wb_tint' else 'temp'
+                self.value['wb'][key] += 1e-8 if self.failure == 'wb_small_mismatch' else 1
+            if self.failure == 'wb_mode': self.value['wb']['mode'] = 'auto'
+            if self.failure == 'wb_scale': self.value['wb']['scale'] = 'relative'
+            if self.failure == 'wb_downgrade': self.value['wb'].pop('scale', None)
+            if self.failure == 'wb_metadata': self.value['wb']['unexpected'] = True
+            if self.failure == 'wb_light': self.value['light']['exposure'] += 1
+            if self.failure == 'wb_small_state': self.value['light']['contrast'] += 1e-9
+            if self.failure == 'wb_mask': self.value['masks'][0]['adjust']['temp'] += 1
+            if self.failure == 'wb_curve': self.value['curve']['red'] = []
+            if self.failure == 'wb_crop': self.value['crop']['angle'] = 1
+            if self.failure == 'wb_extra_result': result['mode'] = 'custom'
+            if self.failure == 'wb_missing_result': result.pop('tint')
+            if self.failure == 'wb_nonfinite_result': result['temp'] = float('nan')
         elif ident == 'develop.curve':
             self.value['curve']['master'] = [dict(zip(('x', 'y'), point)) for point in params['points']]
             result = None
@@ -230,7 +292,7 @@ class StageChecks(unittest.TestCase):
         for phase in ('joint', 'integrated'):
             self.validate({'values': {'effects.texture': 4, 'light.blacks': -2, 'wb.tint': 2}}, phase)
         for ident in COMMAND_IDS:
-            if ident in ('develop.curve', 'curve.reset', 'mask.adjust'): continue
+            if ident in ('develop.curve', 'curve.reset', 'develop.wbPick', 'mask.adjust'): continue
             with self.subTest(command=ident):
                 with self.assertRaises(ValueError): self.validate({'commands': [{'id': ident, 'params': {}}]})
         with self.assertRaises(ValueError): self.validate({'phase': 'joint', 'values': {'light.blacks': 0}}, 'tone')
@@ -244,6 +306,134 @@ class StageChecks(unittest.TestCase):
         legacy = baseline(); legacy['wb'].pop('scale')
         with self.assertRaises(ValueError): self.validate({'settings': {'wb': {'temp': 5800, 'scale': 'kelvin'}}}, 'color', legacy)
 
+    def test_wb_picker_catalog_exact_native_contract_and_availability(self):
+        self.assertEqual(module_for('develop.wbPick'), 'wb')
+        with self.assertRaises(ValueError): module_for('develop.wb')
+        contract = _result_contract('develop.wbPick')
+        self.assertTrue(contract['handoff_required'])
+        self.assertFalse(contract['may_create_mask_id'])
+        self.assertEqual(set(contract['native_schema']['properties']), {'temp', 'tint'})
+        _check({'temp': 5732, 'tint': 7}, contract['native_schema'], 'result')
+        for result in ({'temp': 5732}, {'temp': True, 'tint': 0},
+                       {'temp': float('nan'), 'tint': 0}, {'temp': 5732, 'tint': 7, 'mode': 'custom'},
+                       {'pending': True}, None):
+            with self.assertRaises(ValueError): _check(result, contract['native_schema'], 'result')
+        catalog = build_catalog([], self.deps['commands'], self.deps)
+        row = next(r for r in catalog['commands'] if r['id'] == 'develop.wbPick')
+        self.assertEqual(row['module'], 'wb')
+        self.assertEqual(row['availability'], 'ready')
+        self.assertTrue(row['source_status']['source'].endswith('/develop.rs'))
+        self.assertIn('SourceLevel::Thumb', row['schema']['description'])
+        self.assertIn('5x5', row['schema']['description'])
+        self.assertNotIn('develop.wb', [r['id'] for r in catalog['commands']])
+        disabled = copy.deepcopy(self.deps)
+        next(r for r in disabled['commands'] if r['id'] == 'develop.wbPick')['enabled'] = False
+        blocked = build_catalog([], disabled['commands'], disabled)
+        self.assertEqual(next(r for r in blocked['commands'] if r['id'] == 'develop.wbPick')['availability'], 'blocked')
+
+    def test_wb_picker_finite_full_source_coordinates_phases_and_dependencies(self):
+        command = {'id': 'develop.wbPick', 'params': {'x': .23, 'y': .71}}
+        for phase in ('color', 'joint', 'integrated'):
+            for params in ({'x': 0, 'y': 1}, {'x': 1, 'y': 0}, command['params']):
+                self.assertEqual(self.validate({'commands': [{**command, 'params': params}]}, phase), ['wb'])
+        for key in ('x', 'y'):
+            for value in (float('nan'), float('inf'), -float('inf'), -.001, 1.001, True, '0.5', None):
+                bad = copy.deepcopy(command); bad['params'][key] = value
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ValueError): self.validate({'commands': [bad]}, 'color')
+        for params in ({'x': .2}, {'y': .3}, {}, {'x': .2, 'y': .3, 'channel': 'master'}):
+            with self.assertRaises(ValueError): self.validate({'commands': [{**command, 'params': params}]}, 'color')
+        with self.assertRaises(ValueError): self.validate({'commands': [command]}, 'tone')
+        with self.assertRaises(ValueError): self.validate({'commands': [command], 'values': {'wb.tint': 3}}, 'color')
+        for enabled in (False, None, 'true', 1):
+            deps = dependencies()
+            next(r for r in deps['commands'] if r['id'] == 'develop.wbPick')['enabled'] = enabled
+            native = FakeNative(); native.stage_phase = 'color'; trace = []
+            with self.assertRaises(ValueError):
+                stage.apply_stage_operation(native, self.base, {'commands': [command]}, deps, trace)
+            self.assertEqual(native.calls, [])
+            self.assertEqual(trace, [])
+        deps = dependencies(); deps['commands'] = [r for r in deps['commands'] if r['id'] != 'develop.wbPick']
+        with self.assertRaises(ValueError): stage.validate_stage_operation({'commands': [command]}, self.base, 'color', deps)
+        for ident in ('develop.wb', 'develop.wbAuto', 'develop.wbPreset'):
+            deps = dependencies(); deps['commands'].append({'id': ident, 'enabled': True})
+            with self.assertRaises(ValueError):
+                stage.validate_stage_operation({'commands': [{'id': ident, 'params': {'mode': 'auto'}}]}, self.base, 'color', deps)
+        with self.assertRaises(ValueError):
+            validate_commands([command, {'id': 'curve.reset', 'params': {'channel': 'master'}}], self.base, self.deps)
+
+    def test_wb_picker_real_command_strict_trace_readback_and_normalized_scale(self):
+        command = {'id': 'develop.wbPick', 'params': {'x': .23, 'y': .71}}
+        for phase in ('color', 'joint', 'integrated'):
+            for before_scale, after_scale in (('kelvin', 'kelvin'), ('legacy', 'legacy'),
+                                              (None, 'legacy'), (None, 'kelvin'), ('legacy', 'kelvin')):
+                with self.subTest(phase=phase, before_scale=before_scale, after_scale=after_scale):
+                    base = baseline(); base['masks'] = [mask()]
+                    base['wb']['mode'] = 'asShot'
+                    base['curve']['red'] = [{'x': 0, 'y': .3}]
+                    base['light']['contrast'] = 17
+                    base['profile'] = {'id': 'accepted-profile', 'amount': 180}
+                    base['wb'].pop('scale')
+                    if before_scale is not None: base['wb']['scale'] = before_scale
+                    native = FakeNative(base); native.stage_phase = phase; native.wb_pick_scale = after_scale
+                    trace, snapshots = [], []
+                    original = stage.apply_strict
+                    with patch.object(stage, 'apply_strict', wraps=original) as strict:
+                        actual = stage.apply_stage_operation(native, base, {'commands': [command]}, self.deps,
+                            trace, lambda: snapshots.append(copy.deepcopy(trace)))
+                    self.assertEqual(strict.call_count, 1)
+                    expected = copy.deepcopy(base)
+                    expected['wb'] = {'mode': 'custom', **native.wb_pick_result}
+                    if after_scale == 'kelvin': expected['wb']['scale'] = 'kelvin'
+                    self.assertEqual(actual, expected)
+                    issued = [c for tool, c in native.calls if tool == 'command_run' and c['id'] != 'library.state']
+                    self.assertEqual(issued, [command])
+                    self.assertFalse(any(tool == 'apply' for tool, _ in native.calls))
+                    entry = next(r for r in trace if r.get('command') == command)
+                    self.assertEqual(entry['result'], native.wb_pick_result)
+                    self.assertEqual(entry['settings_readback'], actual)
+                    self.assertTrue(all(r['status'] == 'complete' for r in trace))
+                    self.assertTrue(any(s[0]['status'] == 'pending' for s in snapshots))
+        native = FakeNative(); native.stage_phase = 'tone'
+        with self.assertRaises(ValueError): stage.apply_stage_operation(native, self.base, {'commands': [command]}, self.deps, [])
+        self.assertEqual(native.calls, [])
+
+    def test_wb_picker_mixed_atomic_prefix_preserves_actual_parent_and_no_channel_fallthrough(self):
+        base = baseline(); base['masks'] = [mask()]
+        prefix = {'id': 'mask.adjust', 'params': {'id': 73, 'values': {'temp': -7}}}
+        picker = {'id': 'develop.wbPick', 'params': {'x': .23, 'y': .71}}
+        native = FakeNative(base); native.stage_phase = 'color'; trace = []
+        actual = stage.apply_stage_operation(native, base, {'commands': [prefix, picker]}, self.deps, trace)
+        self.assertEqual(actual['masks'][0]['adjust'], {**base['masks'][0]['adjust'], 'temp': -7})
+        self.assertEqual(actual['curve'], base['curve'])
+        self.assertTrue(all(r['status'] == 'complete' for r in trace))
+        for commands in ([picker, prefix], [picker, picker]):
+            native = FakeNative(base); trace = []
+            with self.assertRaises(ValueError): stage.apply_stage_operation(native, base, {'commands': commands}, self.deps, trace)
+            self.assertEqual(native.calls, [])
+            self.assertEqual(trace, [])
+
+    def test_wb_picker_failures_remain_pending_without_restore_or_replay(self):
+        picker = {'commands': [{'id': 'develop.wbPick', 'params': {'x': .23, 'y': .71}}]}
+        for failure in ('wb_temp', 'wb_tint', 'wb_small_mismatch', 'wb_mode', 'wb_scale', 'wb_downgrade',
+                        'wb_metadata', 'wb_light', 'wb_small_state', 'wb_mask', 'wb_curve', 'wb_crop',
+                        'wb_extra_result', 'wb_missing_result', 'wb_nonfinite_result',
+                        'pending', 'started', 'envelope', 'throw', 'restore'):
+            with self.subTest(failure=failure):
+                base = baseline(); base['masks'] = [mask()]
+                base['curve']['red'] = [{'x': 0, 'y': .3}]
+                native = FakeNative(base); native.failure = failure; trace, snapshots = [], []
+                with self.assertRaises((ValueError, RuntimeError)):
+                    stage.apply_stage_operation(native, base, picker, self.deps, trace,
+                        lambda: snapshots.append(copy.deepcopy(trace)))
+                self.assertEqual(trace[0]['status'], 'pending')
+                self.assertEqual(snapshots[-1][0]['status'], 'pending')
+                issued = [c for tool, c in native.calls if tool == 'command_run' and c['id'] == 'develop.wbPick']
+                self.assertEqual(len(issued), 0 if failure == 'restore' else 1)
+                count = len(native.calls)
+                with self.assertRaises(ValueError): stage.apply_stage_operation(native, base, picker, self.deps, trace)
+                self.assertEqual(len(native.calls), count)
+
     def test_master_curve_and_atomic_reset(self):
         self.validate({'settings': {'curve': {'master': [{'x': 0, 'y': 0}, {'x': .5, 'y': .7}, {'x': 1, 'y': 1}]}}}, 'tone')
         self.validate({'commands': [{'id': 'develop.curve', 'params': {'channel': 'master', 'points': [[0, 0], [1, 1]]}}]}, 'tone')
@@ -256,6 +446,143 @@ class StageChecks(unittest.TestCase):
         with self.assertRaises(ValueError): self.validate({'values': {'curve.master': []}})
         with self.assertRaises(ValueError): self.validate({'values': {'curve.splitShadows': 60}})
         with self.assertRaises(ValueError): self.validate({'commands': [{'id': 'curve.reset', 'params': {'channel': 'master'}}], 'values': {'light.exposure': 1}})
+
+    def test_tone_curve_both_entries_small_monotone_no_endpoint_generation(self):
+        def operations(points):
+            return ({'settings': {'curve': {'master': [dict(zip(('x', 'y'), p)) for p in points]}}},
+                    {'commands': [{'id': 'develop.curve', 'params': {'points': points}}]})
+        for points in ([], [[.1, .2], [.9, .8]], [[.1, .3], [.4, .3], [.8, .7]],
+                       [[0, .1], [.2, .2], [.4, .3], [.6, .5], [1, .9]]):
+            for args in operations(points):
+                base = baseline()
+                base['curve']['master'] = [{'x': i / 9, 'y': (9 - i) / 9} for i in range(10)]
+                base['curve']['red'] = [{'x': 0, 'y': .3}]
+                native = FakeNative(base); native.stage_phase = 'tone'; trace = []
+                actual = stage.apply_stage_operation(native, base, args, self.deps, trace)
+                self.assertEqual(actual['curve']['master'], [dict(zip(('x', 'y'), p)) for p in points])
+                self.assertEqual(actual['curve']['red'], base['curve']['red'])
+                self.assertTrue(all(r['status'] == 'complete' for r in trace))
+        invalid = ([[.5, .5]], [[i / 5, i / 5] for i in range(6)], [[0, .8], [1, .2]],
+                   [[.4, 0], [.4, 1]], [[.8, 0], [.2, 1]], [[-.1, 0], [1, 1]],
+                   [[0, 0], [1, 1.01]], [[True, 0], [1, 1]], [[0, float('nan')], [1, 1]],
+                   [[0, 0], [float('inf'), 1]])
+        for points in invalid:
+            for args in operations(points):
+                native = FakeNative(); native.stage_phase = 'tone'; trace = []
+                with self.assertRaises(ValueError):
+                    stage.apply_stage_operation(native, self.base, args, self.deps, trace)
+                self.assertEqual(native.calls, [])
+                self.assertEqual(trace, [])
+        for phase in ('joint', 'integrated'):
+            for points in ([[.5, .4]], [[i / 7, 1 - i / 7] for i in range(8)]):
+                for args in operations(points): self.validate(args, phase)
+        for args in operations([]):
+            with self.assertRaises(ValueError): self.validate(args, 'color')
+
+    def test_pre_tone_wb_rejects_all_checkable_inputs_before_native_apply(self):
+        valid = {'values': {'wb.temp': 5900}}
+        bad = [{}, {'values': {}}, {'values': []}, {'values': {'wb.mode': 'custom'}},
+               {'values': {'wb.tint': True}}, {'values': {'wb.temp': float('nan')}},
+               {'values': {'wb.temp': 1999}}, {'values': {'wb.temp': 50001}},
+               {'values': {'wb.tint': 151}}, {'values': {'wb.temp': '5900'}},
+               {'values': {'wb.temp': 5900, 'light.exposure': 0}},
+               {'values': {'wb.temp': 5900, 'temp': 3}}]
+        for key, value in (('settings', {}), ('commands', []), ('mask_plan', None),
+                           ('settings', {'wb': {'temp': 5900}}),
+                           ('commands', [{'id': 'develop.wbPick', 'params': {'x': .2, 'y': .4}}]),
+                           ('phase', 'pre_tone_wb'), ('phase', 'joint'), ('phase', 'tone')):
+            bad.append({**valid, key: value})
+        for args in bad:
+            native = FakeNative(); native.stage_phase = 'pre_tone_wb'; trace = []
+            with self.assertRaises(ValueError):
+                stage.apply_stage_operation(native, self.base, args, self.deps, trace)
+            self.assertEqual(native.calls, [])
+            self.assertEqual(trace, [])
+        for wb in ({}, {'mode': 'invalid', 'temp': 6500, 'tint': 0},
+                   {'mode': 'asShot', 'scale': 'relative', 'temp': 6500, 'tint': 0},
+                   {'mode': 'asShot', 'temp': 6500, 'tint': float('inf')}):
+            base = baseline(); base['wb'] = wb
+            native = FakeNative(base); native.stage_phase = 'pre_tone_wb'
+            with self.assertRaises(ValueError): stage.apply_stage_operation(native, base, valid, self.deps, [])
+            self.assertEqual(native.calls, [])
+        for field, value in (('min', 6000), ('max', 5800), ('enabled', False), ('availability', 'blocked'), ('min', None)):
+            native = FakeNative(); native.stage_phase = 'pre_tone_wb'
+            next(c for c in native.native_controls if c['id'] == 'wb.temp')[field] = value
+            with self.assertRaises(ValueError): stage.apply_stage_operation(native, self.base, valid, self.deps, [])
+            self.assertEqual(native.calls, [])
+        for rows in ([], None, [c for c in controls() if c['id'] != 'wb.tint']):
+            native = FakeNative(); native.stage_phase = 'pre_tone_wb'; native.native_controls = rows
+            with self.assertRaises(ValueError): stage.apply_stage_operation(native, self.base, valid, self.deps, [])
+            self.assertEqual(native.calls, [])
+        with self.assertRaises(ValueError): stage._phase('pre_tone_wb')
+        native = FakeNative(); native.stage_phase = 'tone'
+        with self.assertRaises(ValueError): stage.apply_stage_operation(native, self.base, valid, self.deps, [])
+        self.assertEqual(native.calls, [])
+
+    def test_pre_tone_wb_exact_scalar_path_as_shot_and_scale_normalization(self):
+        for mode in ('asShot', 'custom'):
+            for before_scale, after_scale in (('kelvin', 'kelvin'), ('legacy', 'legacy'),
+                                               (None, 'legacy'), (None, 'kelvin'), ('legacy', 'kelvin')):
+                for values in ({'wb.temp': 5900}, {'wb.tint': 4}, {'wb.temp': 5900, 'wb.tint': 4}):
+                    with self.subTest(mode=mode, before=before_scale, after=after_scale, values=values):
+                        base = baseline(); base['masks'] = [mask()]
+                        base['curve']['master'] = [{'x': i / 9, 'y': (9 - i) / 9} for i in range(10)]
+                        base['curve']['red'] = [{'x': 0, 'y': .3}]
+                        base['point_colors'] = [{'hue': 44}]
+                        base['profile'] = {'id': 'accepted', 'amount': 170}
+                        base['wb'].update(mode=mode)
+                        base['wb'].pop('scale')
+                        if before_scale is not None: base['wb']['scale'] = before_scale
+                        native = FakeNative(base); native.stage_phase = 'pre_tone_wb'; native.wb_apply_scale = after_scale
+                        args = {'values': values, 'rationale': 'needed ' * 20000,
+                                'review': {'remaining_gaps': 'x' * 200000}, 'predicted_effect': ['x'] * 5000}
+                        trace, snapshots = [], []
+                        with patch.object(stage, 'apply_strict', wraps=stage.apply_strict) as strict:
+                            actual = stage.apply_stage_operation(native, base, args, self.deps, trace,
+                                lambda: snapshots.append(copy.deepcopy(trace)))
+                        self.assertEqual(strict.call_count, 1)
+                        expected = copy.deepcopy(base)
+                        if mode == 'asShot': expected['wb'].update(native.as_shot_wb)
+                        elif before_scale != 'kelvin' and after_scale == 'kelvin':
+                            expected['wb'].update(native.normalized_legacy_wb)
+                        expected['wb']['mode'] = 'custom'
+                        expected['wb'].pop('scale', None)
+                        if after_scale == 'kelvin': expected['wb']['scale'] = 'kelvin'
+                        expected['wb'].update({k.split('.')[1]: v for k, v in values.items()})
+                        self.assertEqual(actual, expected)
+                        self.assertEqual(next(a for tool, a in native.calls if tool == 'apply'), args)
+                        self.assertEqual([tool for tool, _ in native.calls], ['apply', 'restore'])
+                        self.assertTrue(all(r['status'] == 'complete' for r in trace))
+                        self.assertEqual(snapshots[0][0]['status'], 'pending')
+        native = FakeNative(); native.stage_phase = 'pre_tone_wb'
+        next(c for c in native.native_controls if c['id'] == 'wb.temp').update(min=-100, max=100)
+        self.assertEqual(stage.apply_stage_operation(native, self.base, {'values': {'wb.temp': -30}}, self.deps, [])['wb']['temp'], -30)
+
+    def test_pre_tone_wb_bad_readback_and_non_wb_changes_remain_pending_no_replay(self):
+        for failure in ('apply_bad_value', 'apply_tiny_value', 'apply_bool', 'apply_mode', 'apply_scale',
+                        'apply_downgrade', 'apply_missing_axis', 'apply_nonfinite', 'apply_axis_range',
+                        'apply_other_axis', 'apply_metadata', 'apply_light', 'apply_mask', 'apply_rgb',
+                        'apply_point', 'apply_profile', 'apply_unknown', 'apply_pending', 'apply_throw', 'restore'):
+            with self.subTest(failure=failure):
+                base = baseline(); base['masks'] = [mask()]
+                base['profile'] = {'id': 'accepted', 'amount': 170}
+                base['curve']['red'] = [{'x': 0, 'y': .3}]
+                native = FakeNative(base); native.stage_phase = 'pre_tone_wb'; native.failure = failure
+                trace, snapshots = [], []
+                args = {'values': {'wb.temp': 5900}}
+                with self.assertRaises((ValueError, RuntimeError)):
+                    stage.apply_stage_operation(native, base, args, self.deps, trace,
+                        lambda: snapshots.append(copy.deepcopy(trace)))
+                self.assertEqual(trace[0]['status'], 'pending')
+                self.assertEqual(snapshots[-1][0]['status'], 'pending')
+                count = len(native.calls)
+                with self.assertRaises(ValueError): stage.apply_stage_operation(native, base, args, self.deps, trace)
+                self.assertEqual(len(native.calls), count)
+        for trace in ([{'status': 'pending'}], [{'status': 'unknown'}], [{}], [None]):
+            native = FakeNative(); native.stage_phase = 'pre_tone_wb'
+            with self.assertRaises(ValueError):
+                stage.apply_stage_operation(native, self.base, {'values': {'wb.tint': 3}}, self.deps, trace)
+            self.assertEqual(native.calls, [])
 
     def test_long_auxiliary_fields_are_not_operational_limits(self):
         args = {'values': {'light.blacks': -100}, 'rationale': 'useful ' * 20000,

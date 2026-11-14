@@ -34,13 +34,13 @@ function inside(root,relative){
 function positive(value){return Number.isSafeInteger(value)&&value>0;}
 function stageResources(root,p){
   if(p.resource_profile===undefined)return null;
-  if(p.resource_profile!=='stage-resource/v13'||p.approved_build!=='dsh-stage-runtime-v13-20261113')throw new DispatchDenied('Unknown stage resource profile/build');
+  if(p.resource_profile!=='stage-resource/v20'||p.approved_build!=='dsh-stage-runtime-v20-20261114')throw new DispatchDenied('Unknown stage resource profile/build');
   // Host-owned fixed lookup; policy/model text cannot choose a resource file.
   let r;
   try{r=read(path.join(root,'src/photo_stage_resources.json'));}
   catch{throw new DispatchDenied('Trusted stage resources unavailable');}
   const t=r?.transport,m=r?.model;
-  if(r?.schema!=='photo-stage-resources/v1'||r.id!=='stage-resource/v13'||r.build!=='dsh-stage-runtime-v13-20261113'||
+  if(r?.schema!=='photo-stage-resources/v1'||r.id!=='stage-resource/v20'||r.build!=='dsh-stage-runtime-v20-20261114'||
       !t||!m||!['max_body_bytes','max_text_bytes','max_response_bytes','authorization_hours'].every(k=>positive(t[k]))||
       t.authorization_hours!==24||t.timeout_ms!==600000||t.images!==2||!positive(m.requested_output_tokens)||
       !positive(m.maximum_output_tokens)||m.requested_output_tokens>m.maximum_output_tokens)throw new DispatchDenied('Invalid trusted stage resource profile');

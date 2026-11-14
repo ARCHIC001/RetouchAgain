@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import photo_stage_operations as stage
-from photo_stage_schema import stage_edit_schema
+from photo_stage_schema import pre_tone_wb_schema, stage_edit_schema
 from photo_capability_catalog import _check, _object
 from check_photo_stage_operations import baseline, controls, create, dependencies, mask
 
@@ -77,11 +77,13 @@ class StageSchemaChecks(unittest.TestCase):
             ids = {b['properties']['id']['const'] for b in branches}
             expected = {'mask.adjust', 'mask.update', 'mask.select', 'mask.delete', 'mask.visible', 'mask.rename'}
             if phase != 'color': expected |= {'develop.curve', 'curve.reset'}
+            if phase != 'tone': expected.add('develop.wbPick')
             self.assertEqual(ids, expected)
             field = stage._local_fields(phase)[0]
             commands = [
                 {'id': 'develop.curve', 'params': {'points': [[0, 0], [1, 1]]}},
                 {'id': 'curve.reset', 'params': {'channel': 'parametric'}},
+                {'id': 'develop.wbPick', 'params': {'x': .23, 'y': .71}},
                 {'id': 'mask.adjust', 'params': {'id': 73, 'values': {field: .2}}},
                 {'id': 'mask.select', 'params': {'id': 73}},
                 {'id': 'mask.delete', 'params': {'id': 73}},
@@ -109,6 +111,24 @@ class StageSchemaChecks(unittest.TestCase):
                 for value in (None, True, -1, 4294967296):
                     self.parity({'commands': [{'id': ident, 'params': {'id': value}}]}, phase, False)
 
+    def test_wb_picker_schema_coordinate_and_phase_parity(self):
+        for phase in PHASES:
+            for params in ({'x': 0, 'y': 1}, {'x': 1, 'y': 0}, {'x': .23, 'y': .71}):
+                self.parity({'commands': [{'id': 'develop.wbPick', 'params': params}]}, phase, phase != 'tone')
+            for key in ('x', 'y'):
+                for value in (float('nan'), float('inf'), -float('inf'), -.001, 1.001, True, '0.5', None):
+                    params = {'x': .23, 'y': .71, key: value}
+                    self.parity({'commands': [{'id': 'develop.wbPick', 'params': params}]}, phase, False)
+            for params in ({}, {'x': .23}, {'y': .71}, {'x': .23, 'y': .71, 'channel': 'master'}):
+                self.parity({'commands': [{'id': 'develop.wbPick', 'params': params}]}, phase, False)
+            self.parity({'commands': [{'id': 'develop.wb', 'params': {'mode': 'auto'}}]}, phase, False)
+        spec = next(b for b in stage_edit_schema('color')['commands']['items']['oneOf']
+                    if b['properties']['id']['const'] == 'develop.wbPick')['properties']['params']
+        self.assertEqual(set(spec['required']), {'x', 'y'})
+        self.assertEqual(set(spec['properties']), {'x', 'y'})
+        self.assertIn('SourceLevel::Thumb', spec['description'])
+        self.assertIn('ROI', spec['description'])
+
     def test_curve_representation_and_physical_cardinality(self):
         for phase in PHASES:
             for points in ([], [{'x': 0, 'y': 0}, {'x': 1, 'y': 1}]):
@@ -135,6 +155,55 @@ class StageSchemaChecks(unittest.TestCase):
             bad = copy.deepcopy(shape); bad[key] = value
             self.parity({'commands': [{'id': 'mask.update', 'params': {'id': 73, 'shape': bad}}]}, 'joint', False)
         self.parity({'commands': [{'id': 'mask.update', 'params': {'id': 73, 'component': 1, 'shape': shape}}]}, 'joint', False)
+
+    def test_tone_curve_small_reset_schema_and_runtime_ordering(self):
+        def operations(points):
+            return ({'settings': {'curve': {'master': [dict(zip(('x', 'y'), p)) for p in points]}}},
+                    {'commands': [{'id': 'develop.curve', 'params': {'points': points}}]})
+        for points in ([], [[.1, .3], [.9, .8]], [[.1, .3], [.3, .3], [.8, .9]],
+                       [[0, .2], [.2, .3], [.4, .4], [.6, .6], [.9, .8]]):
+            for args in operations(points): self.parity(args, 'tone')
+        for points in ([[.5, .4]], [[i / 5, i / 5] for i in range(6)]):
+            for args in operations(points):
+                self.parity(args, 'tone', False)
+                for phase in ('joint', 'integrated'): self.parity(args, phase)
+        for points in ([[0, .7], [1, .4]], [[.2, 0], [.2, 1]], [[.8, 0], [.2, 1]]):
+            for args in operations(points):
+                self.schema_check(args, 'tone')
+                with self.assertRaises(ValueError): self.actual_check(args, 'tone')
+        for args in operations([[i / 7, 1 - i / 7] for i in range(8)]):
+            for phase in ('joint', 'integrated'): self.parity(args, phase)
+        spec = next(b for b in stage_edit_schema('tone')['commands']['items']['oneOf']
+                    if b['properties']['id']['const'] == 'develop.curve')['properties']['params']
+        self.assertIn('nondecreasing', spec['description'])
+        self.assertNotIn('need not be monotonic', spec['description'])
+
+    def test_pre_tone_wb_values_only_schema_ranges_and_metadata(self):
+        props = stage_edit_schema('pre_tone_wb')
+        self.assertEqual(props, pre_tone_wb_schema())
+        self.assertEqual(set(props), {'values'})
+        self.assertEqual(set(props['values']['properties']), {'wb.temp', 'wb.tint'})
+        for ident in ('wb.temp', 'wb.tint'):
+            lo, hi = stage.CONTROL_RANGES[ident]
+            for value in (lo, hi): self.parity({'values': {ident: value}}, 'pre_tone_wb')
+            for value in (lo - .1, hi + .1, True, None, '3', float('nan'), float('inf')):
+                self.parity({'values': {ident: value}}, 'pre_tone_wb', False)
+        self.parity({'values': {'wb.temp': 5900, 'wb.tint': 4}}, 'pre_tone_wb')
+        self.parity({'values': {}}, 'pre_tone_wb', False)
+        for ident in ('wb.mode', 'wb.scale', 'light.exposure', 'curve.highlights', 'color.saturation', 'mask.temp'):
+            self.parity({'values': {'wb.tint': 4, ident: 0}}, 'pre_tone_wb', False)
+        for key, value in (('settings', {}), ('commands', []), ('mask_plan', {}), ('phase', 'pre_tone_wb')):
+            self.parity({'values': {'wb.tint': 4}, key: value}, 'pre_tone_wb', False)
+        native = controls(); next(c for c in native if c['id'] == 'wb.temp').update(min=-100, max=100)
+        with self.assertRaises(ValueError): self.actual_check({'values': {'wb.temp': 5900}}, 'pre_tone_wb', native=native)
+        self.actual_check({'values': {'wb.temp': -30}}, 'pre_tone_wb', native=native)
+        args = {'values': {'wb.temp': 5900}, 'rationale': 'useful ' * 20000,
+                'review': {'remaining_gaps': 'x' * 200000}, 'predicted_effect': ['x'] * 5000}
+        self.actual_check(args, 'pre_tone_wb')
+        # The caller merges operation properties into its unchanged metadata contract.
+        _check(args, _object({**props, 'rationale': {}, 'review': {}, 'predicted_effect': {}}, ('values',)), 'edit')
+        props['values']['properties'].clear()
+        self.assertEqual(set(pre_tone_wb_schema()['values']['properties']), {'wb.temp', 'wb.tint'})
 
     def test_readback_dependent_constraints_remain_runtime_guards(self):
         cases = [
@@ -166,8 +235,7 @@ class StageSchemaChecks(unittest.TestCase):
                 self.assertNotIn('default', value)
                 self.assertNotIn('maxLength', value)
                 if 'maxItems' in value:
-                    self.assertEqual(value['minItems'], 2)
-                    self.assertEqual(value['maxItems'], 2)
+                    self.assertIn((value.get('minItems', 0), value['maxItems']), ((2, 2), (0, 0), (2, 5)))
                 for child in value.values(): visit(child)
             elif isinstance(value, list):
                 for child in value: visit(child)

@@ -8,7 +8,7 @@ import copy
 
 import photo_stage_operations as stage
 from photo_stage_tasks import control_sort_key, registry
-from photo_capability_catalog import _command_schema, _LOCAL, _object, _point
+from photo_capability_catalog import _command_schema, _LOCAL, _object
 
 
 def _command_contracts(phase):
@@ -17,6 +17,8 @@ def _command_contracts(phase):
            'mask.visible', 'mask.rename']
     if phase != 'color':
         ids[:0] = ['develop.curve', 'curve.reset']
+    if phase != 'tone':
+        ids.append('develop.wbPick')
     branches = []
     for ident in ids:
         params = copy.deepcopy(_command_schema(ident))
@@ -28,6 +30,9 @@ def _command_contracts(phase):
             required.append('id')
         if ident == 'develop.curve':
             props['channel'] = {'type': 'string', 'const': 'master'}
+            props['points'] = stage._curve_schema(False, phase)
+            if phase == 'tone':
+                params['description'] = props['points']['description']
         elif ident == 'curve.reset':
             props['channel'] = {'type': 'string', 'enum': ['master', 'parametric']}
             required.append('channel')
@@ -52,12 +57,26 @@ def _command_contracts(phase):
     return {'type': 'array', 'items': {'oneOf': branches}}
 
 
+def pre_tone_wb_schema():
+    """Operation properties for a host-only execution scope, not a workflow phase."""
+    values = _object({ident: {'type': 'number',
+        'minimum': stage.CONTROL_RANGES[ident][0], 'maximum': stage.CONTROL_RANGES[ident][1]}
+        for ident in ('wb.temp', 'wb.tint')}, minProperties=1)
+    values['description'] = ('Explicit finite absolute native WB values, at least one axis. '
+        'Current list_controls ranges/availability are authoritative. Static native units '
+        'are not a claim of Kelvin qualification for every source format. No settings, '
+        'commands, mask_plan or submitted phase; narrative/review metadata stays with the caller.')
+    return {'values': values}
+
+
 def stage_edit_schema(phase='joint'):
-    """Return values/settings/commands/mask_plan property schemas for one phase.
+    """Return operation property schemas for one phase or host execution scope.
 
     No hidden defaults or narrative limits are added. Native command and mask
     schemas retain physical point cardinality and positive long-edge radii.
     """
+    if phase == 'pre_tone_wb':
+        return pre_tone_wb_schema()
     stage._phase(phase)
     allowed = stage._allowed_ids(phase)
     values = _object({ident: {'type': 'number',
@@ -78,9 +97,7 @@ def stage_edit_schema(phase='joint'):
             node = node['properties'].setdefault(part, _object({}))
         node['properties'][parts[-1]] = copy.deepcopy(values['properties'][ident])
     if phase != 'color':
-        settings['properties']['curve']['properties']['master'] = {
-            'type': 'array', 'items': _point(serialized=True),
-            'description': 'Serialized {x,y} points; empty resets to linear. Input x must strictly increase.'}
+        settings['properties']['curve']['properties']['master'] = stage._curve_schema(True, phase)
     if phase != 'tone':
         settings['properties']['wb']['properties'].update(
             mode={'type': 'string', 'description': 'Only custom or the exact observed current mode; not preset selection. Requires an explicit temp/tint patch and runtime readback validation.'},
