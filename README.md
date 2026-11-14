@@ -110,7 +110,7 @@ flowchart TB
         TK & PB & EL --> WP["context.work_packet<br/>• Focus Group & 5-Field Expectation<br/>• Cursor-Indexed History & Off-Branch Archive"]:::flowMid
         EL -->|"Executed Mutation"| Debt["photo-review-debt/v2<br/>(Stable focus_id & review_region)"]:::origVisual
         Debt -->|"no_regression / minor_acceptable"| Settled(["resolved / accepted_tradeoff"]):::flowEnd
-        Debt -->|"spawn_joint_task"| JointSpawn["Atomic Spawn: joint-from:<debt_id><br/>(Evidence & Protected Scope Only)"]:::origGuard
+        Debt -->|"spawn_joint_task"| JointSpawn["Atomic Spawn: joint-from:{debt_id}<br/>(Evidence & Protected Scope Only)"]:::origGuard
         EL -->|"Branch Revert"| Reset["BRANCH RESET NOTICE<br/>Off-Branch Pending Marked Inapplicable"]:::origGuard
     end
 ```
@@ -127,14 +127,14 @@ Harness 将调色任务拆解为 **Issue → Branch → Module → Fine Group**�
 ```mermaid
 sequenceDiagram
     autonumber
-    box rgba(237, 233, 254, 0.5) Decision & Adaptation Layer
+    box #ede9fe Decision and Adaptation Layer
         participant Agent as DSH Agent
         participant Adapter as JS Adapter / Schema
     end
-    box rgba(209, 250, 229, 0.5) Harness State Machine
+    box #d1fae5 Harness State Machine
         participant Worker as Python Worker (v20)
     end
-    box rgba(239, 246, 255, 0.7) Execution Backend
+    box #eff6ff Execution Backend
         participant Native as Native Imaging Backend
     end
 
@@ -142,21 +142,21 @@ sequenceDiagram
     Adapter->>Agent: Dispatch Single-Turn Reasoning Request
     Agent-->>Adapter: Submit photo_stage_turn<br/>(review / anchors / bank_delta / selected_group / action)
 
-    rect rgba(254, 243, 199, 0.45)
-        Note over Adapter,Worker: Idempotent Normalization & Fault Isolation
-        Adapter->>Worker: Preserve raw/canonical/warnings (unknown anchor fallback / alias norm)
-        Worker->>Worker: Validate Stage Scope, Typed Deps & Debt Batch Isolation
+    rect rgba(254,243,199,0.45)
+        Note over Adapter,Worker: Idempotent Normalization and Fault Isolation
+        Adapter->>Worker: Preserve raw/canonical/warnings (unknown fallback / alias norm)
+        Worker->>Worker: Validate Stage Scope, Typed Deps and Debt Batch Isolation
     end
 
     alt Validation Rejected (no-effect before native write)
-        Worker-->>Agent: Retain Valid Bank Updates & Return Action Correction Feedback
+        Worker-->>Agent: Retain Valid Bank Updates and Return Correction Feedback
     else Passed Execution Fence
-        rect rgba(255, 228, 230, 0.45)
-            Note over Worker,Native: Atomic Native Transaction & Same-ID Mask Reuse
-            Worker->>Native: Global Patch / develop.wbPick / Mask Transaction<br/>(Create: Bind Real ID → all-20 Init; Reuse: Stage-Scoped Patch)
+        rect rgba(255,228,230,0.45)
+            Note over Worker,Native: Atomic Native Transaction and Same-ID Mask Reuse
+            Worker->>Native: Global Patch / develop.wbPick / Mask Transaction<br/>(Create: Bind Real ID -> all-20 Init | Reuse: Stage-Scoped Patch)
             Native-->>Worker: Readback DevelopSettings + Full-Res Render
         end
-        Worker->>Worker: Update Version Tree, close_proof & Next Observation Pair
+        Worker->>Worker: Update Version Tree, close_proof and Next Observation Pair
     end
 ```
 
@@ -206,8 +206,8 @@ sequenceDiagram
 - `src/photo_stage_close_proof.py` / `src/photo_stage_continuation.py`：闭合证明重建与检查点无缝续接。
 - `src/photo_stage_observation.py` / `src/photo_image_contract.py` / `src/raw_render_contract.py`：色彩、ICC、RAW 几何与灰度观察图派生。
 
-### 运行离线合成测试
-在安装 `Pillow` 和 `NumPy` 后，可直接运行以下 **11 个离线合成测试脚本**验证核心状态机、v20 引导机制、闭合证明与调度逻辑（使用合成夹具，无需外部模型或原生后端）：
+### 单元测试
+安装 `Pillow` 与 `NumPy` 后，可运行以下测试脚本验证状态机、阶段调度、局部蒙版事务及闭合证明逻辑：
 
 ```bash
 python -I -B -X utf8 src/check_photo_working_context.py

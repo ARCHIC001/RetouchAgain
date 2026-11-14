@@ -37,11 +37,11 @@ flowchart LR
     Debt -->|"Visual Review Complete"| Eval{"Review Outcome"}:::origVisual
     Eval -->|"no_regression"| Res(["resolved<br/>Verified No Regression"]):::flowEnd
     Eval -->|"minor_acceptable"| Trade(["accepted_tradeoff<br/>Explicit Tradeoff Accepted"]):::flowEnd
-    Eval -->|"spawn_joint_task"| Joint["reviewed_joint_task<br/>Atomic Spawn joint-from:<debt_id>"]:::origGuard
+    Eval -->|"spawn_joint_task"| Joint["reviewed_joint_task<br/>Atomic Spawn joint-from:{debt_id}"]:::origGuard
     Joint -->|"Agent Plans & Selects Group"| Exec["Refine in Joint Phase"]:::flowMid
 ```
 
-- **原子派生 Joint 任务**：`spawn_joint_task` 会以原子、幂等方式创建 `joint-from:<debt_id>` 诊断节点（初始 `groups: []`），仅承载视觉证据与保护区域关系，后续由模型显式补充参数方案后再执行。
+- **原子派生 Joint 任务**：`spawn_joint_task` 会以原子、幂等方式创建 `joint-from:{debt_id}` 诊断节点（初始 `groups: []`），仅承载视觉证据与保护区域关系，后续由模型显式补充参数方案后再执行。
 
 ## 4. v18–v20 提交容错与规范化
 
